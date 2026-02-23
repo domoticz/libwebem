@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>libwebem — WebSocket Example</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+        h2   { margin-top: 2rem; }
+        .panel {
+            border: 1px solid #ccc; border-radius: 6px;
+            padding: 1rem; margin-bottom: 1.5rem;
+        }
+        .log {
+            height: 160px; overflow-y: auto;
+            background: #1e1e1e; color: #d4d4d4;
+            font-family: monospace; font-size: 0.85rem;
+            padding: 0.5rem; border-radius: 4px;
+            margin: 0.5rem 0;
+        }
+        .log .sent     { color: #9cdcfe; }
+        .log .received { color: #b5cea8; }
+        .log .system   { color: #dcdcaa; }
+        .row { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+        input[type=text] { flex: 1; padding: 0.4rem 0.6rem; }
+        button { padding: 0.4rem 0.8rem; cursor: pointer; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 10px;
+                 font-size: 0.75rem; font-weight: bold; margin-left: 0.5rem; }
+        .badge.connected    { background: #d4edda; color: #155724; }
+        .badge.disconnected { background: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <h1>libwebem — WebSocket Example</h1>
+    <p>Two independent WebSocket endpoints are running on this server.</p>
+
+    <!-- Echo endpoint -->
+    <div class="panel">
+        <h2>
+            Echo endpoint — <code>ws://localhost:8080/ws/echo</code>
+            <span id="echo-badge" class="badge disconnected">disconnected</span>
+        </h2>
+        <p>Sends back whatever you type.</p>
+        <div id="echo-log" class="log"></div>
+        <div class="row">
+            <input id="echo-input" type="text" placeholder="Type a message…" disabled>
+            <button id="echo-connect" onclick="echoConnect()">Connect</button>
+            <button onclick="echoSend()" disabled id="echo-send">Send</button>
+        </div>
+    </div>
+
+    <!-- Chat endpoint -->
+    <div class="panel">
+        <h2>
+            Chat endpoint — <code>ws://localhost:8080/ws/chat</code>
+            <span id="chat-badge" class="badge disconnected">disconnected</span>
+        </h2>
+        <p>Messages are wrapped in a JSON envelope by the server.</p>
+        <div id="chat-log" class="log"></div>
+        <div class="row">
+            <input id="chat-input" type="text" placeholder="Type a message…" disabled>
+            <button id="chat-connect" onclick="chatConnect()">Connect</button>
+            <button onclick="chatSend()" disabled id="chat-send">Send</button>
+        </div>
+    </div>
+
+    <script>
+        // ------------------------------------------------------------------
+        // Echo socket
+        // ------------------------------------------------------------------
+        let echoWs = null;
+
+        function echoConnect() {
+            if (echoWs) { echoWs.close(); return; }
+            echoWs = new WebSocket('ws://' + location.host + '/ws/echo', ['echo']);
+            echoWs.onopen = () => {
+                setEchoState(true);
+                echoLog('system', 'Connected to /ws/echo');
+            };
+            echoWs.onmessage = (e) => echoLog('received', '\u2190 ' + e.data);
+            echoWs.onclose   = () => { setEchoState(false); echoLog('system', 'Disconnected'); echoWs = null; };
+            echoWs.onerror   = (e) => echoLog('system', 'Error: ' + e.message);
+        }
+
+        function echoSend() {
+            const input = document.getElementById('echo-input');
+            if (!echoWs || !input.value.trim()) return;
+            echoLog('sent', '\u2192 ' + input.value);
+            echoWs.send(input.value);
+            input.value = '';
+        }
+
+        function setEchoState(connected) {
+            document.getElementById('echo-badge').className  = 'badge ' + (connected ? 'connected' : 'disconnected');
+            document.getElementById('echo-badge').textContent = connected ? 'connected' : 'disconnected';
+            document.getElementById('echo-input').disabled   = !connected;
+            document.getElementById('echo-send').disabled    = !connected;
+            document.getElementById('echo-connect').textContent = connected ? 'Disconnect' : 'Connect';
+        }
+
+        function echoLog(cls, msg) {
+            const el = document.getElementById('echo-log');
+            el.insertAdjacentHTML('beforeend', `<div class="${cls}">${escHtml(msg)}</div>`);
+            el.scrollTop = el.scrollHeight;
+        }
+
+        document.getElementById('echo-input').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') echoSend();
+        });
+
+        // ------------------------------------------------------------------
+        // Chat socket
+        // ------------------------------------------------------------------
+        let chatWs = null;
+
+        function chatConnect() {
+            if (chatWs) { chatWs.close(); return; }
+            chatWs = new WebSocket('ws://' + location.host + '/ws/chat', ['chat-v1']);
+            chatWs.onopen = () => {
+                setChatState(true);
+                chatLog('system', 'Connected to /ws/chat');
+            };
+            chatWs.onmessage = (e) => {
+                try {
+                    const obj = JSON.parse(e.data);
+                    chatLog('received', '\u2190 [' + obj.type + '] ' + obj.text);
+                } catch (_) {
+                    chatLog('received', '\u2190 ' + e.data);
+                }
+            };
+            chatWs.onclose = () => { setChatState(false); chatLog('system', 'Disconnected'); chatWs = null; };
+            chatWs.onerror = (e) => chatLog('system', 'Error: ' + e.message);
+        }
+
+        function chatSend() {
+            const input = document.getElementById('chat-input');
+            if (!chatWs || !input.value.trim()) return;
+            chatLog('sent', '\u2192 ' + input.value);
+            chatWs.send(input.value);
+            input.value = '';
+        }
+
+        function setChatState(connected) {
+            document.getElementById('chat-badge').className  = 'badge ' + (connected ? 'connected' : 'disconnected');
+            document.getElementById('chat-badge').textContent = connected ? 'connected' : 'disconnected';
+            document.getElementById('chat-input').disabled   = !connected;
+            document.getElementById('chat-send').disabled    = !connected;
+            document.getElementById('chat-connect').textContent = connected ? 'Disconnect' : 'Connect';
+        }
+
+        function chatLog(cls, msg) {
+            const el = document.getElementById('chat-log');
+            el.insertAdjacentHTML('beforeend', `<div class="${cls}">${escHtml(msg)}</div>`);
+            el.scrollTop = el.scrollHeight;
+        }
+
+        document.getElementById('chat-input').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') chatSend();
+        });
+
+        // ------------------------------------------------------------------
+        // Utility
+        // ------------------------------------------------------------------
+        function escHtml(s) {
+            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+    </script>
+</body>
+</html>

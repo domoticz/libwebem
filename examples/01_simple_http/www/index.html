@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>libwebem — Simple HTTP Example</title>
+    <style>
+        body { font-family: sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+        h1   { color: #333; }
+        button { padding: 0.5rem 1rem; margin: 0.25rem; cursor: pointer; }
+        pre  { background: #f4f4f4; padding: 1rem; border-radius: 4px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>libwebem — Simple HTTP Example</h1>
+    <p>This page is served as a static file from the <code>www/</code> directory.</p>
+
+    <h2>API Endpoints</h2>
+    <button onclick="call('/api/hello')">GET /api/hello</button>
+    <button onclick="call('/api/echo?foo=bar&baz=qux')">GET /api/echo</button>
+
+    <h3>Response</h3>
+    <pre id="output">Click a button above to call an API endpoint.</pre>
+
+    <script>
+        async function call(url) {
+            const pre = document.getElementById('output');
+            pre.textContent = 'Loading…';
+            try {
+                const res  = await fetch(url);
+                const text = await res.text();
+                pre.textContent = `HTTP ${res.status}\n\n${JSON.stringify(JSON.parse(text), null, 2)}`;
+            } catch (err) {
+                pre.textContent = 'Error: ' + err.message;
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+name: PR Check
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'examples/**'
+      - '.github/CONTRIBUTING.md'
+      - 'LICENSE'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libboost-thread-dev libssl-dev zlib1g-dev
+
+      - name: Build (SSL enabled)
+        run: |
+          mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DWEBEM_ENABLE_SSL=ON -DWEBEM_ENABLE_ZIP=OFF -DWEBEM_ENABLE_FASTCGI=OFF
+          make -j$(nproc)
+
+      - name: Build (minimal, no SSL)
+        run: |
+          rm -rf build && mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DWEBEM_ENABLE_SSL=OFF -DWEBEM_ENABLE_ZIP=OFF -DWEBEM_ENABLE_FASTCGI=OFF
+          make -j$(nproc)

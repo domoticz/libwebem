@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>libwebem — Authentication Example</title>
+    <style>
+        body  { font-family: sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+        table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+        th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; }
+        th    { background: #f0f0f0; }
+        button { padding: 0.5rem 1rem; margin: 0.25rem; cursor: pointer; }
+        pre   { background: #f4f4f4; padding: 1rem; border-radius: 4px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>libwebem — Authentication Example</h1>
+
+    <h2>Registered Users</h2>
+    <table>
+        <tr><th>Username</th><th>Password</th><th>Rights</th></tr>
+        <tr><td>admin</td><td>secret</td><td>Admin</td></tr>
+        <tr><td>viewer</td><td>viewerpass</td><td>Viewer</td></tr>
+    </table>
+    <p>
+        Requests from <strong>localhost (127.0.0.1 / ::1)</strong> are trusted
+        and skip authentication entirely.
+    </p>
+
+    <h2>API Endpoints</h2>
+    <button onclick="call('/api/public')">GET /api/public (no auth)</button>
+    <button onclick="call('/api/whoami')">GET /api/whoami (auth required)</button>
+    <button onclick="call('/api/admin')">GET /api/admin (admin only)</button>
+
+    <h3>Response</h3>
+    <pre id="output">Click a button above to call an API endpoint.</pre>
+
+    <script>
+        async function call(url) {
+            const pre = document.getElementById('output');
+            pre.textContent = 'Loading…';
+            try {
+                const res  = await fetch(url, { credentials: 'include' });
+                const text = await res.text();
+                let   body = text;
+                try { body = JSON.stringify(JSON.parse(text), null, 2); } catch (_) {}
+                pre.textContent = `HTTP ${res.status}\n\n${body}`;
+            } catch (err) {
+                pre.textContent = 'Error: ' + err.message;
+            }
+        }
+    </script>
+</body>
+</html>

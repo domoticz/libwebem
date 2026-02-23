@@ -1,0 +1,78 @@
+# Build directories
+build/
+build-*/
+out/
+cmake-build-*/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# Visual Studio - user/temp files (keep .vcxproj and .vcxproj.filters)
+*.vcxproj.user
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.vs/
+
+# Visual Studio / MSBuild output directories
+x64/
+x86/
+Win32/
+Debug/
+Release/
+Debug_Build/
+Release_Build/
+*.lib
+*.obj
+*.pdb
+*.idb
+*.ilk
+*.exp
+*.tlog
+*.log
+*.pch
+*.ipch
+ipch/
+*.aps
+*.ncb
+*.opendb
+*.opensdf
+*.sdf
+*.cachefile
+*.VC.db
+*.VC.VC.opendb
+
+# Precompiled headers
+*.gch
+*.pch
+
+# Compiled objects
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Misc
+*.orig
+*.bak
+__pycache__/

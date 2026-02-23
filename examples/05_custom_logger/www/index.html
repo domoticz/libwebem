@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>libwebem — Custom Logger Example</title>
+    <style>
+        body   { font-family: sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+        code   { background: #f4f4f4; padding: 0.1rem 0.3rem; border-radius: 3px; }
+        button { padding: 0.5rem 1rem; margin: 0.25rem; cursor: pointer; }
+        pre    { background: #f4f4f4; padding: 1rem; border-radius: 4px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>libwebem — Custom Logger Example</h1>
+    <p>
+        This server uses a custom <code>IWebServerLogger</code> implementation that:
+    </p>
+    <ul>
+        <li>Writes coloured log messages to the console (stdout/stderr)</li>
+        <li>Appends access log entries to <code>access.log</code> (Apache Combined Log Format)</li>
+    </ul>
+    <p>
+        Each time you make a request, check the server console and
+        <code>access.log</code> to see the output.
+    </p>
+
+    <h2>Make a Request</h2>
+    <button onclick="call('/api/hello')">GET /api/hello</button>
+    <button onclick="call('/notfound')">GET /notfound (404)</button>
+
+    <h3>Response</h3>
+    <pre id="output">Click a button above to generate a log entry.</pre>
+
+    <script>
+        async function call(url) {
+            const pre = document.getElementById('output');
+            pre.textContent = 'Loading…';
+            try {
+                const res  = await fetch(url);
+                const text = await res.text();
+                let   body = text;
+                try { body = JSON.stringify(JSON.parse(text), null, 2); } catch (_) {}
+                pre.textContent = `HTTP ${res.status}\n\n${body || '(empty body)'}`;
+            } catch (err) {
+                pre.textContent = 'Error: ' + err.message;
+            }
+        }
+    </script>
+</body>
+</html>
