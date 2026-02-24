@@ -1,0 +1,9 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: webem
+Description: Embedded C++ web server library
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lwebem
+Cflags: -I${includedir}

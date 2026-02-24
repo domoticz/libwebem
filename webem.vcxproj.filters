@@ -39,6 +39,9 @@
     <Filter Include="Header Files\Configuration">
       <UniqueIdentifier>{E0F1A2B3-C4D5-6789-4567-890123456780}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Header Files\Authentication">
+      <UniqueIdentifier>{A2B3C4D5-E6F7-8901-6789-012345678902}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Header Files\Utilities">
       <UniqueIdentifier>{F1A2B3C4-D5E6-7890-5678-901234567891}</UniqueIdentifier>
     </Filter>

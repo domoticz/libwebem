@@ -14,6 +14,7 @@
 #include <windows.h>
 #else
 #include <pthread.h>
+#include <sys/time.h>
 #endif
 
 #include <libwebem/webem_utils.h>

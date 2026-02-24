@@ -124,3 +124,9 @@ See the [examples/](examples/) directory for complete, buildable applications co
 BSD 3-Clause — see [LICENSE](LICENSE) file.
 
 Portions based on the Boost.Asio HTTP server example by Christopher M. Kohlhoff (Boost Software License 1.0).
+
+### Build Status
+
+Status | Operating system
+------------ | -------------
+[![CI](https://github.com/domoticz/libwebem/actions/workflows/ci.yml/badge.svg)](https://github.com/domoticz/libwebem/actions/workflows/ci.yml) | Linux x86_64

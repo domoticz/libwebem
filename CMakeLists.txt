@@ -196,7 +196,10 @@ else()
         # jwt-cpp is header-only; create a simple INTERFACE target
         # (avoids running jwt-cpp's own CMakeLists.txt which has extra dependencies)
         add_library(jwt-cpp_header_only INTERFACE)
-        target_include_directories(jwt-cpp_header_only INTERFACE ${jwt-cpp_SOURCE_DIR}/include)
+        target_include_directories(jwt-cpp_header_only INTERFACE
+            $<BUILD_INTERFACE:${jwt-cpp_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+        )
         add_library(jwt-cpp::jwt-cpp ALIAS jwt-cpp_header_only)
     endif()
 endif()
@@ -207,29 +210,36 @@ if(WIN32)
     target_link_libraries(webem PUBLIC ws2_32 mswsock)
 endif()
 
-# Install rules
-install(TARGETS webem EXPORT webemTargets
-    ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
-)
-install(DIRECTORY include/libwebem/ DESTINATION include/libwebem
-    FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
-)
-install(EXPORT webemTargets
-    FILE webemConfig.cmake
-    NAMESPACE webem::
-    DESTINATION lib/cmake/webem
-)
+# Install rules (only when built standalone, not as a subdirectory)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    # Collect targets that must be exported alongside webem
+    set(_webem_export_targets webem)
+    if(TARGET jwt-cpp_header_only)
+        list(APPEND _webem_export_targets jwt-cpp_header_only)
+    endif()
+    install(TARGETS ${_webem_export_targets} EXPORT webemTargets
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib
+    )
+    install(DIRECTORY include/libwebem/ DESTINATION include/libwebem
+        FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
+    )
+    install(EXPORT webemTargets
+        FILE webemConfig.cmake
+        NAMESPACE webem::
+        DESTINATION lib/cmake/webem
+    )
 
-# pkg-config file for system package managers (apt, dnf, etc.)
-configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/webem.pc.in
-    ${CMAKE_CURRENT_BINARY_DIR}/webem.pc
-    @ONLY
-)
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/webem.pc
-    DESTINATION lib/pkgconfig
-)
+    # pkg-config file for system package managers (apt, dnf, etc.)
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/webem.pc.in
+        ${CMAKE_CURRENT_BINARY_DIR}/webem.pc
+        @ONLY
+    )
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/webem.pc
+        DESTINATION lib/pkgconfig
+    )
+endif()
 
 # Tests (opt-in)
 if(WEBEM_BUILD_TESTS)

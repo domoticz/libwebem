@@ -2,35 +2,28 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
 
 jobs:
   build-linux:
     runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        compiler: [gcc, clang]
-        ssl: [ON, OFF]
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ clang libboost-thread-dev libssl-dev zlib1g-dev
+          sudo apt-get install -y cmake g++ libboost-thread-dev libssl-dev zlib1g-dev
 
       - name: Configure
         run: |
           mkdir build && cd build
-          if [ "${{ matrix.compiler }}" = "clang" ]; then
-            export CC=clang CXX=clang++
-          fi
           cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
-            -DWEBEM_ENABLE_SSL=${{ matrix.ssl }} \
+            -DWEBEM_ENABLE_SSL=ON \
             -DWEBEM_ENABLE_ZIP=OFF \
             -DWEBEM_ENABLE_FASTCGI=OFF
 

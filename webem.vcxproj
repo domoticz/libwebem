@@ -143,6 +143,7 @@
       <PreprocessorDefinitions>WIN32;NOMINMAX;NDEBUG;WWW_ENABLE_SSL;WITH_TLS;HAVE_SNPRINTF;JSON_DLL;WEBSERVER_DONT_USE_ZIP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>include;src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <DebugInformationFormat>None</DebugInformationFormat>
       <AdditionalOptions>/d2guardspecload %(AdditionalOptions)</AdditionalOptions>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <LanguageStandard>stdcpp17</LanguageStandard>
@@ -162,6 +163,7 @@
       <PreprocessorDefinitions>WIN32;NOMINMAX;NDEBUG;WWW_ENABLE_SSL;WITH_TLS;HAVE_SNPRINTF;JSON_DLL;WEBSERVER_DONT_USE_ZIP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>include;src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <DebugInformationFormat>None</DebugInformationFormat>
       <AdditionalOptions>/d2guardspecload %(AdditionalOptions)</AdditionalOptions>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <LanguageStandard>stdcpp17</LanguageStandard>

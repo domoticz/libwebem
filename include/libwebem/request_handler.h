@@ -75,7 +75,9 @@ private:
 	bool not_modified(const std::string &full_path, const request &req, reply &rep, modify_info &mInfo);
 	//zip support
 #ifndef WEBSERVER_DONT_USE_ZIP
+#ifdef WIN32
 	  zlib_filefunc_def m_ffunc;
+#endif
 	  unzFile m_uf;
 	  bool m_bIsZIP;
 	  void *m_pUnzipBuffer;

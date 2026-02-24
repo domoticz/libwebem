@@ -25,7 +25,10 @@
 #include "GZipHelper.h"
 #endif
 #ifndef WEBSERVER_DONT_USE_ZIP
-	#include <minizip/iowin32.h>
+	#include <minizip/unzip.h>
+	#ifdef WIN32
+		#include <minizip/iowin32.h>
+	#endif
 #endif
 
 
@@ -87,9 +90,12 @@ request_handler::request_handler(const std::string& doc_root, cWebem* webem, Web
 	if (m_bIsZIP)
 	{
 		//open zip file, get file list
+#ifdef WIN32
 		fill_win32_filefunc(&m_ffunc);
-
 		m_uf = unzOpen2(doc_root.c_str(),&m_ffunc);
+#else
+		m_uf = unzOpen(doc_root.c_str());
+#endif
 	}
 	m_pUnzipBuffer = (void*)malloc(ZIPREADBUFFERSIZE);
 #endif
