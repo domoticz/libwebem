@@ -112,6 +112,13 @@ public:
 
 	ssl_server_settings()
 		: server_settings(true)
+		, ssl_method("tls")
+		, ssl_options("default_workarounds,no_sslv2,no_sslv3,no_tlsv1,no_tlsv1_1,single_dh_use")
+		, cipher_list(
+			"ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:"
+			"ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"
+			"ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:"
+			"DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384")
 	{
 	}
 	ssl_server_settings(const ssl_server_settings &s) = default;
@@ -179,6 +186,9 @@ public:
 
 	boost::asio::ssl::context::options get_ssl_options() const {
 		boost::asio::ssl::context::options opts(0x0L);
+
+		if (ssl_options.empty())
+			return opts;
 
 		std::string error_message;
 

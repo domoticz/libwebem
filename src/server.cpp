@@ -189,9 +189,11 @@ void ssl_server::init_connection() {
 		context_.set_options(settings_.get_ssl_options());
 	}
 
-	const char* cipher_list = &settings_.cipher_list[0];
-	SSL_CTX_set_cipher_list(context_.native_handle(), cipher_list);
-	if (m_logger) m_logger->Debug(DebugCategory::WebServer, "[web:%s] Enabled ciphers (TLSv1.2) %s", settings_.listening_port.c_str(), settings_.cipher_list.c_str());
+	if (!settings_.cipher_list.empty())
+	{
+		SSL_CTX_set_cipher_list(context_.native_handle(), settings_.cipher_list.c_str());
+		if (m_logger) m_logger->Debug(DebugCategory::WebServer, "[web:%s] Enabled ciphers (TLSv1.2) %s", settings_.listening_port.c_str(), settings_.cipher_list.c_str());
+	}
 
 	SSL_CTX_set_min_proto_version(context_.native_handle(), TLS1_2_VERSION);
 	SSL_CTX_set_options(context_.native_handle(), SSL_OP_CIPHER_SERVER_PREFERENCE);
