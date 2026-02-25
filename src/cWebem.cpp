@@ -59,7 +59,22 @@ namespace http {
 		{
 			// Remove reference to CWebServer before its deletion (fix a "pure virtual method called" exception on server termination)
 			mySessionStore = nullptr;
-			// Delete server (no need with smart pointer)
+			// Ensure session cleaner thread is stopped before members are destroyed
+			try
+			{
+				if (!m_io_context.stopped())
+				{
+					m_io_context.stop();
+				}
+				if (m_io_context_thread)
+				{
+					m_io_context_thread->join();
+					m_io_context_thread.reset();
+				}
+			}
+			catch (...)
+			{
+			}
 		}
 
 		/**
