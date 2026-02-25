@@ -181,6 +181,37 @@ namespace http {
 			return !m_websocketEndpoints.empty();
 		}
 
+		void cWebem::RegisterWebsocketHandler(std::shared_ptr<IWebsocketHandler> handler)
+		{
+			std::lock_guard<std::mutex> lock(m_websocketHandlersMutex);
+			m_websocketHandlers.push_back(handler);
+		}
+
+		void cWebem::ForEachHandler(std::function<void(IWebsocketHandler*)> callback)
+		{
+			std::vector<std::shared_ptr<IWebsocketHandler>> live;
+			{
+				std::lock_guard<std::mutex> lock(m_websocketHandlersMutex);
+				auto it = m_websocketHandlers.begin();
+				while (it != m_websocketHandlers.end())
+				{
+					if (auto sp = it->lock())
+					{
+						live.push_back(sp);
+						++it;
+					}
+					else
+					{
+						it = m_websocketHandlers.erase(it);
+					}
+				}
+			}
+			for (auto& sp : live)
+			{
+				callback(sp.get());
+			}
+		}
+
 		void cWebem::RegisterNoCachePattern(const std::string& pattern)
 		{
 			std::lock_guard<std::mutex> lock(m_configMutex);

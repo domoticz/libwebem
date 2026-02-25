@@ -7,6 +7,10 @@
 #include "session_store.h"
 #include "IWebServerLogger.h"
 #include "IWebsocketHandler.h"
+#include <functional>
+#include <vector>
+#include <memory>
+#include <mutex>
 
 namespace http
 {
@@ -257,6 +261,13 @@ namespace http
 			std::string GetWebsocketProtocol(const std::string& path) const;
 			bool HasWebsocketEndpoints() const;
 
+			/// Iterate all active WebSocket handlers, pruning disconnected ones.
+			/// The callback is invoked outside the mutex lock to prevent deadlocks.
+			void ForEachHandler(std::function<void(IWebsocketHandler*)> callback);
+
+			/// Called internally when a new WebSocket handler is created.
+			void RegisterWebsocketHandler(std::shared_ptr<IWebsocketHandler> handler);
+
 			/// Register a URI substring pattern that forces no-cache response headers.
 			/// Any request whose URI contains this substring will receive
 			/// "Cache-Control: no-cache,must-revalidate" regardless of the file type.
@@ -285,6 +296,11 @@ namespace http
 			/// myWhitelistCommands, m_noCachePatterns, m_userpasswords) against
 			/// concurrent access from registration and request-handler threads.
 			mutable std::mutex m_configMutex;
+
+			/// Registry of active WebSocket handlers (weak references).
+			/// Pruned automatically by ForEachHandler when connections close.
+			std::vector<std::weak_ptr<IWebsocketHandler>> m_websocketHandlers;
+			std::mutex m_websocketHandlersMutex;
 			/// Application version string sent as ETag header value.
 			std::string m_app_version;
 			/// Whether HTTP caching (ETag / Cache-Control) is enabled.

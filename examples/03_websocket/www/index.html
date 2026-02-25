@@ -6,62 +6,87 @@
     <title>libwebem — WebSocket Example</title>
     <style>
         * { box-sizing: border-box; }
-        body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+        body { font-family: sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
         h2   { margin-top: 2rem; }
         .panel {
             border: 1px solid #ccc; border-radius: 6px;
             padding: 1rem; margin-bottom: 1.5rem;
         }
         .log {
-            height: 160px; overflow-y: auto;
+            height: 180px; overflow-y: auto;
             background: #1e1e1e; color: #d4d4d4;
             font-family: monospace; font-size: 0.85rem;
             padding: 0.5rem; border-radius: 4px;
             margin: 0.5rem 0;
         }
-        .log .sent     { color: #9cdcfe; }
-        .log .received { color: #b5cea8; }
-        .log .system   { color: #dcdcaa; }
-        .row { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
-        input[type=text] { flex: 1; padding: 0.4rem 0.6rem; }
-        button { padding: 0.4rem 0.8rem; cursor: pointer; }
+        .log .sent      { color: #9cdcfe; }
+        .log .received  { color: #b5cea8; }
+        .log .broadcast { color: #f0a500; }
+        .log .tick      { color: #c586c0; }
+        .log .system    { color: #dcdcaa; }
+        .row { display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap; }
+        input[type=text] { flex: 1; padding: 0.4rem 0.6rem; min-width: 120px; }
+        button { padding: 0.4rem 0.8rem; cursor: pointer; white-space: nowrap; }
         .badge { display: inline-block; padding: 2px 8px; border-radius: 10px;
                  font-size: 0.75rem; font-weight: bold; margin-left: 0.5rem; }
         .badge.connected    { background: #d4edda; color: #155724; }
         .badge.disconnected { background: #f8d7da; color: #721c24; }
+        .badge.subscribed   { background: #cce5ff; color: #004085; }
+        .note { font-size: 0.85rem; color: #666; margin: 0.25rem 0 0.5rem; }
     </style>
 </head>
 <body>
     <h1>libwebem — WebSocket Example</h1>
-    <p>Two independent WebSocket endpoints are running on this server.</p>
+    <p>
+        Two WebSocket endpoints are running.  The <strong>Echo</strong> endpoint
+        reflects messages back unchanged.  The <strong>PubSub</strong> endpoint
+        demonstrates two server-push patterns: a per-client ticker thread
+        (<code>ticker</code> topic) and a broadcast to all subscribers
+        (<code>announce</code> topic).
+    </p>
 
-    <!-- Echo endpoint -->
+    <!-- ------------------------------------------------------------------ -->
+    <!-- Echo endpoint                                                        -->
+    <!-- ------------------------------------------------------------------ -->
     <div class="panel">
         <h2>
-            Echo endpoint — <code>ws://localhost:8080/ws/echo</code>
+            Echo — <code>ws://localhost:8080/ws/echo</code>
             <span id="echo-badge" class="badge disconnected">disconnected</span>
         </h2>
-        <p>Sends back whatever you type.</p>
+        <p class="note">Sends back exactly what you type. No subscription logic.</p>
         <div id="echo-log" class="log"></div>
         <div class="row">
-            <input id="echo-input" type="text" placeholder="Type a message…" disabled>
+            <input  id="echo-input"   type="text" placeholder="Type a message…" disabled>
             <button id="echo-connect" onclick="echoConnect()">Connect</button>
-            <button onclick="echoSend()" disabled id="echo-send">Send</button>
+            <button id="echo-send"    onclick="echoSend()" disabled>Send</button>
         </div>
     </div>
 
-    <!-- Chat endpoint -->
+    <!-- ------------------------------------------------------------------ -->
+    <!-- PubSub endpoint                                                      -->
+    <!-- ------------------------------------------------------------------ -->
     <div class="panel">
         <h2>
-            Chat endpoint — <code>ws://localhost:8080/ws/chat</code>
-            <span id="chat-badge" class="badge disconnected">disconnected</span>
+            PubSub — <code>ws://localhost:8080/ws/pubsub</code>
+            <span id="ps-badge" class="badge disconnected">disconnected</span>
         </h2>
-        <p>Messages are wrapped in a JSON envelope by the server.</p>
-        <div id="chat-log" class="log"></div>
+        <p class="note">
+            <strong>ticker</strong> — the server pushes an incrementing count to
+            <em>this</em> connection every 2 s (per-handler background thread).<br>
+            <strong>announce</strong> — messages published by any client are
+            broadcast to <em>all</em> connected clients subscribed to this topic
+            via <code>cWebem::ForEachHandler()</code>.  The server also sends a
+            periodic announcement every 15 s from its own background thread.
+        </p>
+        <div id="ps-log" class="log"></div>
         <div class="row">
-            <input id="chat-input" type="text" placeholder="Type a message…" disabled>
-            <button id="chat-connect" onclick="chatConnect()">Connect</button>
-            <button onclick="chatSend()" disabled id="chat-send">Send</button>
+            <button id="ps-connect"          onclick="psConnect()">Connect</button>
+            <button id="ps-sub-ticker"       onclick="psSubscribe('ticker')"   disabled>Subscribe ticker</button>
+            <button id="ps-sub-announce"     onclick="psSubscribe('announce')" disabled>Subscribe announce</button>
+        </div>
+        <div class="row" style="margin-top:0.75rem">
+            <input  id="ps-input"  type="text" placeholder="Announcement text…" disabled>
+            <button id="ps-publish" onclick="psPublish()" disabled>Publish to announce</button>
         </div>
     </div>
 
@@ -78,9 +103,9 @@
                 setEchoState(true);
                 echoLog('system', 'Connected to /ws/echo');
             };
-            echoWs.onmessage = (e) => echoLog('received', '\u2190 ' + e.data);
+            echoWs.onmessage = e => echoLog('received', '\u2190 ' + e.data);
             echoWs.onclose   = () => { setEchoState(false); echoLog('system', 'Disconnected'); echoWs = null; };
-            echoWs.onerror   = (e) => echoLog('system', 'Error: ' + e.message);
+            echoWs.onerror   = () => echoLog('system', 'Connection error');
         }
 
         function echoSend() {
@@ -92,78 +117,142 @@
         }
 
         function setEchoState(connected) {
-            document.getElementById('echo-badge').className  = 'badge ' + (connected ? 'connected' : 'disconnected');
+            document.getElementById('echo-badge').className   = 'badge ' + (connected ? 'connected' : 'disconnected');
             document.getElementById('echo-badge').textContent = connected ? 'connected' : 'disconnected';
-            document.getElementById('echo-input').disabled   = !connected;
-            document.getElementById('echo-send').disabled    = !connected;
+            document.getElementById('echo-input').disabled    = !connected;
+            document.getElementById('echo-send').disabled     = !connected;
             document.getElementById('echo-connect').textContent = connected ? 'Disconnect' : 'Connect';
         }
 
         function echoLog(cls, msg) {
-            const el = document.getElementById('echo-log');
-            el.insertAdjacentHTML('beforeend', `<div class="${cls}">${escHtml(msg)}</div>`);
-            el.scrollTop = el.scrollHeight;
+            appendLog('echo-log', cls, msg);
         }
 
-        document.getElementById('echo-input').addEventListener('keydown', (e) => {
+        document.getElementById('echo-input').addEventListener('keydown', e => {
             if (e.key === 'Enter') echoSend();
         });
 
         // ------------------------------------------------------------------
-        // Chat socket
+        // PubSub socket
         // ------------------------------------------------------------------
-        let chatWs = null;
+        let psWs = null;
+        const psSubscriptions = new Set();
 
-        function chatConnect() {
-            if (chatWs) { chatWs.close(); return; }
-            chatWs = new WebSocket('ws://' + location.host + '/ws/chat', ['chat-v1']);
-            chatWs.onopen = () => {
-                setChatState(true);
-                chatLog('system', 'Connected to /ws/chat');
+        function psConnect() {
+            if (psWs) { psWs.close(); return; }
+            psWs = new WebSocket('ws://' + location.host + '/ws/pubsub', ['pubsub']);
+            psWs.onopen = () => {
+                setPsState(true);
+                psLog('system', 'Connected to /ws/pubsub');
             };
-            chatWs.onmessage = (e) => {
+            psWs.onmessage = e => {
                 try {
-                    const obj = JSON.parse(e.data);
-                    chatLog('received', '\u2190 [' + obj.type + '] ' + obj.text);
+                    const msg = JSON.parse(e.data);
+                    switch (msg.event) {
+                        case 'connected':
+                            psLog('system', msg.text);
+                            break;
+                        case 'subscribed':
+                            psSubscriptions.add(msg.topic);
+                            updateSubButtons();
+                            psLog('system', 'Subscribed to \'' + msg.topic + '\'');
+                            break;
+                        case 'unsubscribed':
+                            psSubscriptions.delete(msg.topic);
+                            updateSubButtons();
+                            psLog('system', 'Unsubscribed from \'' + msg.topic + '\'');
+                            break;
+                        case 'tick':
+                            psLog('tick', '\u23f1 tick #' + msg.count);
+                            break;
+                        case 'message':
+                            psLog('broadcast', '\ud83d\udce2 [' + msg.topic + '] ' + msg.text);
+                            break;
+                        case 'error':
+                            psLog('system', 'Server error: ' + msg.text);
+                            break;
+                        default:
+                            psLog('received', '\u2190 ' + e.data);
+                    }
                 } catch (_) {
-                    chatLog('received', '\u2190 ' + e.data);
+                    psLog('received', '\u2190 ' + e.data);
                 }
             };
-            chatWs.onclose = () => { setChatState(false); chatLog('system', 'Disconnected'); chatWs = null; };
-            chatWs.onerror = (e) => chatLog('system', 'Error: ' + e.message);
+            psWs.onclose = () => {
+                psSubscriptions.clear();
+                setPsState(false);
+                psLog('system', 'Disconnected');
+                psWs = null;
+            };
+            psWs.onerror = () => psLog('system', 'Connection error');
         }
 
-        function chatSend() {
-            const input = document.getElementById('chat-input');
-            if (!chatWs || !input.value.trim()) return;
-            chatLog('sent', '\u2192 ' + input.value);
-            chatWs.send(input.value);
+        function psSubscribe(topic) {
+            if (!psWs) return;
+            if (psSubscriptions.has(topic)) {
+                psWs.send(JSON.stringify({ event: 'unsubscribe', topic }));
+                psLog('sent', '\u2192 unsubscribe: ' + topic);
+            } else {
+                psWs.send(JSON.stringify({ event: 'subscribe', topic }));
+                psLog('sent', '\u2192 subscribe: ' + topic);
+            }
+        }
+
+        function psPublish() {
+            const input = document.getElementById('ps-input');
+            if (!psWs || !input.value.trim()) return;
+            psWs.send(JSON.stringify({ event: 'publish', topic: 'announce', text: input.value }));
+            psLog('sent', '\u2192 publish [announce]: ' + input.value);
             input.value = '';
         }
 
-        function setChatState(connected) {
-            document.getElementById('chat-badge').className  = 'badge ' + (connected ? 'connected' : 'disconnected');
-            document.getElementById('chat-badge').textContent = connected ? 'connected' : 'disconnected';
-            document.getElementById('chat-input').disabled   = !connected;
-            document.getElementById('chat-send').disabled    = !connected;
-            document.getElementById('chat-connect').textContent = connected ? 'Disconnect' : 'Connect';
+        function setPsState(connected) {
+            document.getElementById('ps-badge').className   = 'badge ' + (connected ? 'connected' : 'disconnected');
+            document.getElementById('ps-badge').textContent = connected ? 'connected' : 'disconnected';
+            document.getElementById('ps-sub-ticker').disabled   = !connected;
+            document.getElementById('ps-sub-announce').disabled = !connected;
+            document.getElementById('ps-input').disabled        = !connected;
+            document.getElementById('ps-publish').disabled      = !connected;
+            document.getElementById('ps-connect').textContent   = connected ? 'Disconnect' : 'Connect';
+            if (!connected) updateSubButtons();
         }
 
-        function chatLog(cls, msg) {
-            const el = document.getElementById('chat-log');
-            el.insertAdjacentHTML('beforeend', `<div class="${cls}">${escHtml(msg)}</div>`);
-            el.scrollTop = el.scrollHeight;
+        function updateSubButtons() {
+            const tickerBtn   = document.getElementById('ps-sub-ticker');
+            const announceBtn = document.getElementById('ps-sub-announce');
+            if (psWs) {
+                tickerBtn.textContent   = psSubscriptions.has('ticker')   ? 'Unsubscribe ticker'   : 'Subscribe ticker';
+                announceBtn.textContent = psSubscriptions.has('announce') ? 'Unsubscribe announce' : 'Subscribe announce';
+            } else {
+                tickerBtn.textContent   = 'Subscribe ticker';
+                announceBtn.textContent = 'Subscribe announce';
+            }
         }
 
-        document.getElementById('chat-input').addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') chatSend();
+        function psLog(cls, msg) {
+            appendLog('ps-log', cls, msg);
+        }
+
+        document.getElementById('ps-input').addEventListener('keydown', e => {
+            if (e.key === 'Enter') psPublish();
         });
 
         // ------------------------------------------------------------------
-        // Utility
+        // Shared utility
         // ------------------------------------------------------------------
+        function appendLog(id, cls, msg) {
+            const el = document.getElementById(id);
+            const ts = new Date().toLocaleTimeString();
+            el.insertAdjacentHTML('beforeend',
+                `<div class="${cls}"><span style="opacity:0.5">[${ts}]</span> ${escHtml(msg)}</div>`);
+            el.scrollTop = el.scrollHeight;
+        }
+
         function escHtml(s) {
-            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
         }
     </script>
 </body>

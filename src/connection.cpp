@@ -483,6 +483,7 @@ namespace http {
 									{
 										auto ws_handler = factory(webem, [this](const std::string& data) { WS_Write(data); });
 										websocket_parser.SetHandler(ws_handler);
+										webem->RegisterWebsocketHandler(ws_handler);
 									}
 								}
 							}
