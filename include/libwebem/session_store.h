@@ -41,6 +41,11 @@ public:
   virtual void StoreSession(const WebEmStoredSession &session) = 0;
 
   /**
+   * Update only the expiration time of an existing session (keeps auth token unchanged)
+   */
+  virtual void RenewSessionExpiration(const std::string &sessionId, time_t expires) = 0;
+
+  /**
    * Remove user session from store
    */
   virtual void RemoveSession(const std::string &sessionId) = 0;

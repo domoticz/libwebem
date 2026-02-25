@@ -2463,7 +2463,7 @@ namespace http {
 					send_cookie(rep, session);
 				}
 			}
-			else if (!session.id.empty())	// Session found, Renew session expiration and authentication token
+			else if (!session.id.empty())	// Session found, Renew session expiration (keep auth token unchanged to avoid race conditions with concurrent requests)
 			{
 				WebEmSession* memSession = myWebem->GetSession(session.id);
 				if (memSession != nullptr)
@@ -2473,14 +2473,18 @@ namespace http {
 					if (memSession->expires - (SHORT_SESSION_TIMEOUT / 2) < now)
 					{
 						memSession->expires = now + SHORT_SESSION_TIMEOUT;
-						memSession->auth_token = generateAuthToken(*memSession, req); // do it after expires to save it also
+						session_store_impl_ptr sstore = myWebem->GetSessionStore();
+						if (sstore != nullptr)
+							sstore->RenewSessionExpiration(memSession->id, memSession->expires);
 						send_cookie(rep, *memSession);
 					}
 					// Renew session expiration date if half of session duration has been exceeded ("remember me" sessions, 30 days)
 					else if ((memSession->expires > SHORT_SESSION_TIMEOUT + now) && (memSession->expires - (LONG_SESSION_TIMEOUT / 2) < now))
 					{
 						memSession->expires = now + LONG_SESSION_TIMEOUT;
-						memSession->auth_token = generateAuthToken(*memSession, req); // do it after expires to save it also
+						session_store_impl_ptr sstore = myWebem->GetSessionStore();
+						if (sstore != nullptr)
+							sstore->RenewSessionExpiration(memSession->id, memSession->expires);
 						send_cookie(rep, *memSession);
 					}
 				}
