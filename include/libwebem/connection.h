@@ -72,6 +72,8 @@ namespace http {
 
 			// send packet over websocket
 			void WS_Write(const std::string& packet_data);
+			// send binary packet over websocket
+			void WS_WriteBinary(const std::string& data);
 			/// Add content to write buffer
 			void MyWrite(const std::string& buf);
 			/// Timer handlers

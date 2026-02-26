@@ -158,22 +158,33 @@ namespace http {
 
 		WebsocketHandlerFactory cWebem::GetWebsocketFactory(const std::string& path) const
 		{
+			// Two-pass: exact path first, then "/" catch-all.
+			// Without the two-pass approach the "/" endpoint always wins because its
+			// condition (ep.path == "/") is unconditionally true, so any specific
+			// endpoint registered after "/" is never reached.
+			WebsocketHandlerFactory fallback;
 			for (const auto& ep : m_websocketEndpoints)
 			{
-				if (ep.path == "/" || ep.path == path)
-					return ep.factory;
+				if (ep.path == path)
+					return ep.factory;   // exact match wins
+				if (ep.path == "/" && !fallback)
+					fallback = ep.factory;  // save catch-all for last resort
 			}
-			return nullptr;
+			return fallback;
 		}
 
 		std::string cWebem::GetWebsocketProtocol(const std::string& path) const
 		{
+			// Two-pass: exact path first, then "/" catch-all.
+			std::string fallback;
 			for (const auto& ep : m_websocketEndpoints)
 			{
-				if (ep.path == "/" || ep.path == path)
-					return ep.protocol;
+				if (ep.path == path)
+					return ep.protocol;  // exact match wins
+				if (ep.path == "/" && fallback.empty())
+					fallback = ep.protocol;
 			}
-			return {};
+			return fallback;
 		}
 
 		bool cWebem::HasWebsocketEndpoints() const

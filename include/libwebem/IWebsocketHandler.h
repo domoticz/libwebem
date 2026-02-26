@@ -25,11 +25,14 @@ namespace server {
 		virtual void store_session_id(const request& req, const reply& rep) = 0;
 	};
 
-	// Factory: given a webem pointer and a writer function, create a handler for a specific connection
-	using WebsocketHandlerFactory = std::function<std::shared_ptr<IWebsocketHandler>(
-		cWebem* webem,
-		std::function<void(const std::string&)> writer
-	)>;
+	// Factory: given a webem pointer and two writer functions (text and binary), create a handler for a specific connection
+	using WebsocketHandlerFactory = std::function<
+		std::shared_ptr<IWebsocketHandler>(
+			cWebem*                                   webem,
+			std::function<void(const std::string&)>   text_writer,   // opcode_text (existing)
+			std::function<void(const std::string&)>   binary_writer  // opcode_binary (NEW)
+		)
+	>;
 
 } // namespace server
 } // namespace http

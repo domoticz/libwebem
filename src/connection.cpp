@@ -249,6 +249,18 @@ namespace http {
 			}
 		}
 
+		void connection::WS_WriteBinary(const std::string& data)
+		{
+			if (connection_type == ConnectionType::connection_websocket) {
+				MyWrite(CWebsocketFrame::Create(opcode_binary, data, false));
+			}
+			else {
+				// socket connection not set up yet, add to queue
+				std::unique_lock<std::mutex> lock(writeMutex);
+				writeQ.push_back(CWebsocketFrame::Create(opcode_binary, data, false));
+			}
+		}
+
 		void connection::MyWrite(const std::string& buf)
 		{
 			switch (connection_type) {
@@ -469,7 +481,13 @@ namespace http {
 
 						if (reply_.status == reply::switching_protocols) {
 							// this was an upgrade request
-							connection_type = ConnectionType::connection_websocket;
+							// Do NOT set connection_type = connection_websocket here.
+							// The handler's Start() may call WS_Write/WS_WriteBinary to send data
+							// immediately. Those writes must be queued (writeQ) and delivered only
+							// after the HTTP 101 response below. Setting connection_type to
+							// connection_websocket here causes WS_Write/WS_WriteBinary to write
+							// directly to the socket before the 101, corrupting the handshake.
+							// connection_type is set to connection_websocket after MyWrite() below.
 							// from now on we are a persistant connection
 							keepalive_ = true;
 							// Create the handler via factory for this request path
@@ -481,7 +499,10 @@ namespace http {
 									auto factory = webem->GetWebsocketFactory(req_path);
 									if (factory)
 									{
-										auto ws_handler = factory(webem, [this](const std::string& data) { WS_Write(data); });
+										auto ws_handler = factory(
+										webem,
+										[this](const std::string& data) { WS_Write(data); },
+										[this](const std::string& data) { WS_WriteBinary(data); });
 										websocket_parser.SetHandler(ws_handler);
 										webem->RegisterWebsocketHandler(ws_handler);
 									}
