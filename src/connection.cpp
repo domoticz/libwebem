@@ -502,18 +502,14 @@ namespace http {
 										auto ws_handler = factory(
 										webem,
 										[this](const std::string& data) { WS_Write(data); },
-										[this](const std::string& data) { WS_WriteBinary(data); });
+										[this](const std::string& data) { WS_WriteBinary(data); },
+										reply_.ws_session);
 										websocket_parser.SetHandler(ws_handler);
 										webem->RegisterWebsocketHandler(ws_handler);
 									}
 								}
 							}
 							websocket_parser.Start();
-							{
-								auto handler = websocket_parser.GetHandler();
-								if (handler)
-									handler->store_session_id(request_, reply_);
-							}
 							// todo: check if multiple connection from the same client in CONNECTING state?
 						}
 						else if (reply_.status == reply::download_file) {

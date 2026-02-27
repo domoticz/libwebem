@@ -7,6 +7,7 @@
 #include "session_store.h"
 #include "IWebServerLogger.h"
 #include "IWebsocketHandler.h"
+#include "session.h"
 #include <functional>
 #include <vector>
 #include <memory>
@@ -16,14 +17,6 @@ namespace http
 {
 	namespace server
 	{
-		enum _eUserRights
-		{
-			URIGHTS_VIEWER = 0,
-			URIGHTS_SWITCHER,
-			URIGHTS_ADMIN,
-			URIGHTS_NONE=254,
-			URIGHTS_CLIENTID=255
-		};
 		enum _eAuthenticationMethod
 		{
 			AUTH_LOGIN = 0,
@@ -51,23 +44,6 @@ namespace http
 			std::string SigningSecret;
 			time_t AcceptLegacyTokensUntil = 0;
 		} WebUserPassword;
-
-		typedef struct _tWebEmSession
-		{
-			std::string id;
-			std::string remote_host;
-			std::string local_host;
-			std::string remote_port;
-			std::string local_port;
-			std::string auth_token;
-			std::string username;
-			time_t expires = 0;
-			uint16_t reply_status = http::server::reply::ok;
-			_eUserRights rights = URIGHTS_NONE;
-			bool rememberme = false;
-			bool isnew = false;
-			bool istrustednetwork = false;
-		} WebEmSession;
 
 		typedef struct _tIPNetwork
 		{

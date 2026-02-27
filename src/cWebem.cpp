@@ -1949,6 +1949,9 @@ namespace http {
 			{
 				reply::add_header(&rep, "Sec-Websocket-Protocol", expected_protocol);
 			}
+			// Carry the authenticated session to connection.cpp so the factory receives it
+			// directly without any cookie re-parsing.
+			rep.ws_session = session;
 			return true;
 		}
 

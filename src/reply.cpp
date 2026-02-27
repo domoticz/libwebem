@@ -117,6 +117,7 @@ void reply::reset()
 	headers.clear();
 	content = "";
 	bIsGZIP = false;
+	ws_session = WebEmSession{};
 }
 
 namespace stock_replies {

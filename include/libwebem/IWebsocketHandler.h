@@ -2,13 +2,12 @@
 #include <string>
 #include <functional>
 #include <memory>
+#include "session.h"
 
 namespace http {
 namespace server {
 
 	class cWebem;
-	class request;
-	struct reply;
 
 	class IWebsocketHandler {
 	public:
@@ -20,17 +19,18 @@ namespace server {
 		// Lifecycle
 		virtual void Start() = 0;
 		virtual void Stop() = 0;
-
-		// Called after upgrade to store session info from the HTTP handshake
-		virtual void store_session_id(const request& req, const reply& rep) = 0;
 	};
 
-	// Factory: given a webem pointer and two writer functions (text and binary), create a handler for a specific connection
+	// Factory: given a webem pointer, two writer functions (text and binary), and the
+	// authenticated session from the HTTP upgrade handshake, create a handler.
+	// The session is fully resolved by CheckAuthentication() before the upgrade completes,
+	// so no cookie parsing is required inside the handler.
 	using WebsocketHandlerFactory = std::function<
 		std::shared_ptr<IWebsocketHandler>(
 			cWebem*                                   webem,
-			std::function<void(const std::string&)>   text_writer,   // opcode_text (existing)
-			std::function<void(const std::string&)>   binary_writer  // opcode_binary (NEW)
+			std::function<void(const std::string&)>   text_writer,
+			std::function<void(const std::string&)>   binary_writer,
+			const WebEmSession&                       session
 		)
 	>;
 

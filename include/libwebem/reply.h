@@ -15,6 +15,7 @@
 #include <iterator>
 #include <boost/asio.hpp>
 #include "header.h"
+#include "session.h"
 
 namespace http {
 namespace server {
@@ -55,6 +56,11 @@ struct reply
 
   /// The origin of the web request when behind proxies, etc.
   std::string originHost;
+
+  /// Populated by cWebemRequestHandler when the reply is a WebSocket upgrade (status==switching_protocols).
+  /// Carries the fully-authenticated session so connection.cpp can pass it directly to the
+  /// WebsocketHandlerFactory without re-parsing cookies.
+  WebEmSession ws_session;
 
   /// Convert the reply into a vector of buffers. The buffers do not own the
   /// underlying memory blocks, therefore the reply object must remain valid and
