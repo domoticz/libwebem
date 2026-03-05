@@ -272,6 +272,12 @@ namespace http {
 		void CWebsocket::Stop()
 		{
 			if (m_handler) m_handler->Stop();
+			m_handler.reset();
+		}
+
+		std::shared_ptr<IWebsocketHandler> CWebsocket::DetachHandler()
+		{
+			return std::move(m_handler);
 		}
 
 		IWebsocketHandler * CWebsocket::GetHandler()

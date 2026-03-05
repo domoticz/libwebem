@@ -57,6 +57,10 @@ namespace http
 			virtual void Stop();
 			virtual IWebsocketHandler *GetHandler();
 			void SetHandler(std::shared_ptr<IWebsocketHandler> handler);
+			/// Detach the handler for async cleanup. Returns the handler shared_ptr.
+			/// After this call, the CWebsocket no longer holds a reference.
+			/// @note Only safe to call from the io_context thread (e.g., from connection::stop()).
+			std::shared_ptr<IWebsocketHandler> DetachHandler();
 
 		      private:
 			virtual void OnReceiveText(const std::string &packet_data);

@@ -3,6 +3,7 @@
 //Detailed class and method documentation of the WEBEM C++ embedded web server source code.
 //
 #include "webem_stdafx.h"
+#include <algorithm>
 #include <libwebem/cWebem.h>
 #include <libwebem/reply.h>
 #include <libwebem/request.h>
@@ -195,7 +196,28 @@ namespace http {
 		void cWebem::RegisterWebsocketHandler(std::shared_ptr<IWebsocketHandler> handler)
 		{
 			std::lock_guard<std::mutex> lock(m_websocketHandlersMutex);
+			m_websocketHandlers.erase(
+				std::remove_if(m_websocketHandlers.begin(), m_websocketHandlers.end(),
+					[](const std::weak_ptr<IWebsocketHandler>& wp) { return wp.expired(); }),
+				m_websocketHandlers.end());
 			m_websocketHandlers.push_back(handler);
+		}
+
+		void cWebem::ScheduleHandlerCleanup(std::shared_ptr<IWebsocketHandler> handler)
+		{
+			if (!handler)
+				return;
+			if (m_logger)
+				m_logger->Debug(DebugCategory::WebServer, "WebSocket: scheduling async handler cleanup");
+			boost::asio::post(m_io_context, [handler = std::move(handler), logger = m_logger]() {
+				try {
+					handler->Stop();
+				}
+				catch (...) {
+					if (logger)
+						logger->Log(LogLevel::Error, "WebSocket: exception during async handler cleanup");
+				}
+			});
 		}
 
 		void cWebem::ForEachHandler(std::function<void(IWebsocketHandler*)> callback)

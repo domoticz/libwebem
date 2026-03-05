@@ -244,6 +244,10 @@ namespace http
 			/// Called internally when a new WebSocket handler is created.
 			void RegisterWebsocketHandler(std::shared_ptr<IWebsocketHandler> handler);
 
+			/// Schedule async cleanup of a WebSocket handler.
+			/// Handler::Stop() is called on a background thread, never on the server io_context.
+			void ScheduleHandlerCleanup(std::shared_ptr<IWebsocketHandler> handler);
+
 			/// Register a URI substring pattern that forces no-cache response headers.
 			/// Any request whose URI contains this substring will receive
 			/// "Cache-Control: no-cache,must-revalidate" regardless of the file type.

@@ -128,14 +128,20 @@ namespace http {
 		{
 			switch (connection_type) {
 			case ConnectionType::connection_websocket:
-				// todo: send close frame and wait for writeQ to flush
-				//websocket_parser.SendClose("");
-				websocket_parser.Stop();
-				break;
 			case ConnectionType::connection_websocket_closing:
-				// todo: wait for writeQ to flush, so client can receive the close frame
-				websocket_parser.Stop();
+			{
+				auto handler = websocket_parser.DetachHandler();
+				if (handler) {
+					auto* webem = request_handler_.Get_myWebem();
+					if (webem) {
+						webem->ScheduleHandlerCleanup(std::move(handler));
+					} else {
+						if (m_logger) m_logger->Log(LogLevel::Error, "WebSocket: webem unavailable, falling back to inline handler cleanup");
+						try { handler->Stop(); } catch (...) {}
+					}
+				}
 				break;
+			}
 			}
 			// Cancel timers
 			cancel_abandoned_timeout();
