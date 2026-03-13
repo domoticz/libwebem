@@ -29,6 +29,7 @@ namespace http {
 			, default_abandoned_timeout_(20 * 60)
 			// 20mn before stopping abandoned connection
 			, abandoned_timer_(io_context, std::chrono::seconds(default_abandoned_timeout_))
+			, ws_session_renewal_timer_(io_context)
 			, connection_manager_(manager)
 			, request_handler_(handler)
 			, status_(INITIALIZING)
@@ -52,6 +53,7 @@ namespace http {
 			, default_abandoned_timeout_(20 * 60)
 			// 20mn before stopping abandoned connection
 			, abandoned_timer_(io_context, std::chrono::seconds(default_abandoned_timeout_))
+			, ws_session_renewal_timer_(io_context)
 			, connection_manager_(manager)
 			, request_handler_(handler)
 			, status_(INITIALIZING)
@@ -144,6 +146,7 @@ namespace http {
 			}
 			}
 			// Cancel timers
+			cancel_ws_session_renewal();
 			cancel_abandoned_timeout();
 			cancel_read_timeout();
 
@@ -526,6 +529,8 @@ namespace http {
 									}
 								}
 							}
+							m_ws_session_id = reply_.ws_session.id;
+							start_ws_session_renewal();
 							websocket_parser.Start();
 							// todo: check if multiple connection from the same client in CONNECTING state?
 						}
@@ -720,6 +725,41 @@ namespace http {
 				if (m_logger) m_logger->Log(LogLevel::Status, "%s -> handle abandoned timeout (status=%d)", host_remote_endpoint_address_.c_str(), status_);
 				connection_manager_.stop(shared_from_this());
 			}
+		}
+
+		// Interval at which the WebSocket session renewal timer fires.
+		// Must be shorter than SHORT_SESSION_TIMEOUT/2 (defined in cWebem.cpp) so that
+		// RenewSessionIfNeeded() reliably catches the renewal window before expiry.
+		static constexpr int kWsSessionRenewalInterval = 60; // seconds
+
+		/// Start periodic session renewal timer for an authenticated WebSocket connection.
+		/// Fires every kWsSessionRenewalInterval seconds so the session stays alive
+		/// even when the client sends no HTTP requests (e.g. passive dashboard pages).
+		void connection::start_ws_session_renewal() {
+			if (m_ws_session_id.empty())
+				return;
+			ws_session_renewal_timer_.expires_after(std::chrono::seconds(kWsSessionRenewalInterval));
+			ws_session_renewal_timer_.async_wait([self = shared_from_this()](const boost::system::error_code& err) {
+				self->handle_ws_session_renewal(err);
+			});
+		}
+
+		void connection::cancel_ws_session_renewal() {
+			try {
+				ws_session_renewal_timer_.cancel();
+			}
+			catch (...) {}
+		}
+
+		void connection::handle_ws_session_renewal(const boost::system::error_code& error) {
+			if (error == boost::asio::error::operation_aborted)
+				return;
+			if (connection_type != ConnectionType::connection_websocket)
+				return;
+			auto* webem = request_handler_.Get_myWebem();
+			if (webem && !m_ws_session_id.empty())
+				webem->RenewSessionIfNeeded(m_ws_session_id);
+			start_ws_session_renewal();
 		}
 
 	} // namespace server

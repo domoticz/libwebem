@@ -1043,6 +1043,28 @@ namespace http {
 				m_sessions.erase(itt);
 		}
 
+		void cWebem::RenewSessionIfNeeded(const std::string &sessionId)
+		{
+			if (sessionId.empty())
+				return;
+			WebEmSession* memSession = GetSession(sessionId);
+			if (memSession == nullptr)
+				return;
+			time_t now = utils::webem_time();
+			if (memSession->expires - (SHORT_SESSION_TIMEOUT / 2) < now)
+			{
+				memSession->expires = now + SHORT_SESSION_TIMEOUT;
+				if (mySessionStore != nullptr)
+					mySessionStore->RenewSessionExpiration(sessionId, memSession->expires);
+			}
+			else if ((memSession->expires > SHORT_SESSION_TIMEOUT + now) && (memSession->expires - (LONG_SESSION_TIMEOUT / 2) < now))
+			{
+				memSession->expires = now + LONG_SESSION_TIMEOUT;
+				if (mySessionStore != nullptr)
+					mySessionStore->RenewSessionExpiration(sessionId, memSession->expires);
+			}
+		}
+
 		int cWebem::CountSessions()
 		{
 			std::unique_lock<std::mutex> lock(m_sessionsMutex);
@@ -1743,7 +1765,16 @@ namespace http {
 			const std::string& cookieName = myWebem->m_session_cookie_name;
 			std::stringstream sstr;
 			sstr << cookieName << "=" << session.id << "_" << session.auth_token << "." << session.expires;
-			sstr << "; HttpOnly; SameSite=strict; path=/; Expires=" << utils::make_web_time(session.expires);
+			sstr << "; HttpOnly; SameSite=strict; path=/";
+			// Only set Expires for "remember me" (long-lived) sessions.
+			// Short sessions use a browser session cookie (no Expires) so the browser keeps
+			// sending it until it is closed, while the server enforces the actual inactivity
+			// timeout independently via the session expiry check in CheckAuthentication.
+			// Using session.rememberme as primary; fall back to checking the expiry duration
+			// so that remember-me sessions still get a persistent cookie after a server restart
+			// (when rememberme is not stored in the DB and defaults to false in memory).
+			if (session.rememberme || session.expires > utils::webem_time() + SHORT_SESSION_TIMEOUT)
+				sstr << "; Expires=" << utils::make_web_time(session.expires);
 			reply::add_header(&rep, "Set-Cookie", sstr.str(), false);
 		}
 
@@ -1785,21 +1816,14 @@ namespace http {
 					}
 					size_t upos = scookie.find('_', fpos);
 					size_t ppos = scookie.find('.', upos);
-					time_t now = utils::webem_time();
 					if ((fpos != std::string::npos) && (upos != std::string::npos) && (ppos != std::string::npos))
 					{
 						sSID = scookie.substr(fpos + cookiePrefixLen, upos - fpos - cookiePrefixLen);
 						sAuthToken = scookie.substr(upos + 1, ppos - upos - 1);
 						szTime = scookie.substr(ppos + 1);
 
-						time_t stime;
-						std::stringstream sstr;
-						sstr << szTime;
-						sstr >> stime;
-
-						expired = stime < now;
 						bCookie = true;
-						if (m_logger) m_logger->Debug(DebugCategory::Auth, "[web:%s] Found cookie (%s) with expiration time (%s)(%d)", myWebem->GetPort().c_str(), sSID.c_str(), szTime.c_str(), expired);
+						if (m_logger) m_logger->Debug(DebugCategory::Auth, "[web:%s] Found cookie (%s) with expiration time (%s)", myWebem->GetPort().c_str(), sSID.c_str(), szTime.c_str());
 					}
 				}
 			}

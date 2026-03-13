@@ -208,6 +208,10 @@ namespace http
 			void AddSession(const WebEmSession &session);
 			void RemoveSession(const WebEmSession &session);
 			void RemoveSession(const std::string &ssid);
+			/// Renew a session's expiration if past its half-life, using the same
+			/// logic as HTTP request processing. Called by WebSocket connections to
+			/// keep the session alive while no HTTP requests are being made.
+			void RenewSessionIfNeeded(const std::string &sessionId);
 			std::vector<std::string> GetExpiredSessions();
 			int CountSessions();
 			_eAuthenticationMethod m_authmethod;

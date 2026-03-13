@@ -82,6 +82,7 @@ namespace http {
 			/// Timer handlers
 			void handle_read_timeout(const boost::system::error_code& error);
 			void handle_abandoned_timeout(const boost::system::error_code& error);
+			void handle_ws_session_renewal(const boost::system::error_code& error);
 
 		private:
 			/// Handle completion of a read operation.
@@ -118,6 +119,12 @@ namespace http {
 			/// Reschedule abandoned timeout timer
 			void reset_abandoned_timeout();
 
+			/// Start/cancel the periodic session-renewal timer used by WebSocket connections.
+			/// Fires every kWsSessionRenewalInterval seconds; delegates threshold logic
+			/// to cWebem::RenewSessionIfNeeded so no session constants leak into this file.
+			void start_ws_session_renewal();
+			void cancel_ws_session_renewal();
+
 			/// Socket for the (PLAIN) connection.
 			std::unique_ptr<boost::asio::ip::tcp::socket> socket_;
 			//Host EndPoints
@@ -140,6 +147,11 @@ namespace http {
 			long default_abandoned_timeout_;
 			/// Abandoned timeout timer
 			boost::asio::steady_timer abandoned_timer_;
+
+			/// Session ID for WebSocket connections (used for periodic session renewal)
+			std::string m_ws_session_id;
+			/// Periodic session renewal timer for WebSocket connections
+			boost::asio::steady_timer ws_session_renewal_timer_;
 
 			/// The manager for this connection.
 			connection_manager& connection_manager_;
