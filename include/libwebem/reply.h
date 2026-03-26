@@ -41,6 +41,7 @@ struct reply
     unauthorized = 401,
     forbidden = 403,
     not_found = 404,
+    method_not_allowed = 405,
     internal_server_error = 500,
     not_implemented = 501,
     bad_gateway = 502,

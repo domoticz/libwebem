@@ -34,6 +34,7 @@ namespace status_strings {
 	constexpr auto unauthorized = "HTTP/1.1 401 Unauthorized\r\n";
 	constexpr auto forbidden = "HTTP/1.1 403 Forbidden\r\n";
 	constexpr auto not_found = "HTTP/1.1 404 Not Found\r\n";
+	constexpr auto method_not_allowed = "HTTP/1.1 405 Method Not Allowed\r\n";
 	constexpr auto internal_server_error = "HTTP/1.1 500 Internal Server Error\r\n";
 	constexpr auto not_implemented = "HTTP/1.1 501 Not Implemented\r\n";
 	constexpr auto bad_gateway = "HTTP/1.1 502 Bad Gateway\r\n";
@@ -71,6 +72,8 @@ namespace status_strings {
 				return forbidden;
 			case reply::not_found:
 				return not_found;
+			case reply::method_not_allowed:
+				return method_not_allowed;
 			case reply::internal_server_error:
 				return internal_server_error;
 			case reply::not_implemented:
@@ -163,6 +166,10 @@ namespace stock_replies {
 				   "<head><title>Not Found</title></head>"
 				   "<body><h1>404 Not Found</h1></body>"
 				   "</html>";
+	constexpr auto method_not_allowed = "<html>"
+				   "<head><title>Method Not Allowed</title></head>"
+				   "<body><h1>405 Method Not Allowed</h1></body>"
+				   "</html>";
 	constexpr auto internal_server_error = "<html>"
 					       "<head><title>Internal Server Error</title></head>"
 					       "<body><h1>500 Internal Server Error</h1></body>"
@@ -212,6 +219,8 @@ namespace stock_replies {
 				return forbidden;
 			case reply::not_found:
 				return not_found;
+			case reply::method_not_allowed:
+				return method_not_allowed;
 			case reply::internal_server_error:
 				return internal_server_error;
 			case reply::not_implemented:
