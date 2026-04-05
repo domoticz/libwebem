@@ -735,7 +735,8 @@ namespace http {
 
 			// Determine the file extension.
 			std::string extension;
-			if (req.uri.find("/json.htm?") != std::string::npos)
+			// API endpoints that return JSON don't have a file extension, so we need to check for them explicitly
+			if ((req.uri.find("/json.htm?") != std::string::npos && req.uri.find("/json.htm?") == 0) || (request_path == "/api"))
 			{
 				extension = "json";
 			}
@@ -767,10 +768,12 @@ namespace http {
 				catch (std::exception& e)
 				{
 					if (m_logger) m_logger->Log(LogLevel::Error, "[web:%s] PO exception occurred : '%s'", GetPort().c_str(), e.what());
+					rep.status = reply::internal_server_error;
 				}
 				catch (...)
 				{
 					if (m_logger) m_logger->Log(LogLevel::Error, "[web:%s] PO unknown exception occurred", GetPort().c_str());
+					rep.status = reply::internal_server_error;
 				}
 				std::string attachment;
 				for (const auto &header : rep.headers)
@@ -856,6 +859,13 @@ namespace http {
 				{
 					request_path = "";
 				}
+			}
+
+			// For API endpoints, ignore any additional path segments after "/api/" as the 'API' handler will parse the full path and query string itself.
+			// This allows for more flexible API endpoint definitions without needing to register a separate page function for each one.
+			if (request_path.find("/api/") != std::string::npos && request_path.find("/api/") == 0)
+			{
+				request_path = "/api";
 			}
 
 			return request_path;
