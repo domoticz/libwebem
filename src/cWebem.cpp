@@ -651,6 +651,41 @@ namespace http {
 			return false;
 		}
 
+		bool cWebem::DispatchPageOptions(WebEmSession& session, const request& req, reply& rep)
+		{
+			std::string request_path;
+			request_handler::url_decode(req.uri, request_path);
+			request_path = ExtractRequestPath(request_path);
+
+			size_t paramPos = request_path.find_first_of('?');
+			if (paramPos != std::string::npos)
+				request_path = request_path.substr(0, paramPos);
+
+			webem_page_function pageFun;
+			{
+				std::lock_guard<std::mutex> lock(m_configMutex);
+				auto pfun = myPages.find(request_path);
+				if (pfun == myPages.end())
+					return false;
+				pageFun = pfun->second;
+			}
+			try
+			{
+				pageFun(session, req, rep);
+			}
+			catch (std::exception& e)
+			{
+				if (m_logger) m_logger->Log(LogLevel::Error, "[web:%s] OPTIONS dispatch exception: '%s'", GetPort().c_str(), e.what());
+				rep = reply::stock_reply(reply::internal_server_error);
+			}
+			catch (...)
+			{
+				if (m_logger) m_logger->Log(LogLevel::Error, "[web:%s] OPTIONS dispatch unknown exception", GetPort().c_str());
+				rep = reply::stock_reply(reply::internal_server_error);
+			}
+			return true;
+		}
+
 		bool cWebem::IsPageOverride(const request& req, reply& rep)
 		{
 			std::string request_path;
@@ -2488,6 +2523,12 @@ namespace http {
 			// 4) Respond to CORS Preflight request (for JSON API)
 			if (req.method == "OPTIONS")
 			{
+				// Route preflight to registered page handlers so they can declare their own
+				// CORS requirements. Uses a direct dispatch that skips parameter parsing and
+				// auth lookup — the handler receives an unauthenticated session and must not
+				// process user data.
+				if (myWebem->DispatchPageOptions(session, req, rep))
+					return;
 				reply::add_header(&rep, "Content-Length", "0");
 				reply::add_header(&rep, "Content-Type", "text/plain");
 				reply::add_header(&rep, "Access-Control-Max-Age", "3600");

@@ -30,9 +30,9 @@ public:
 	int http_version_major;
 	int http_version_minor;
 	std::vector<header> headers;
-	int content_length;				// the expected length of the contents
+	int content_length = 0;			// the expected length of the contents
 	std::string content;				// the contents
-	bool keep_alive;					// send Keep-Alive header
+	bool keep_alive = false;				// send Keep-Alive header
 
 	/// store map between pages and application functions (wide char)
 	std::multimap<std::string, std::string> parameters;

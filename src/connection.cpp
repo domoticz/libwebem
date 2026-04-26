@@ -11,6 +11,7 @@
 #include <libwebem/connection.h>
 #include <boost/algorithm/string.hpp>
 #include <iomanip>
+#include <set>
 #include <sstream>
 #include <libwebem/connection_manager.h>
 #include <libwebem/request_handler.h>
@@ -566,14 +567,29 @@ namespace http {
 						else if (reply_.status == reply::sse_stream) {
 							// Send plain HTTP 200 SSE headers -- sse_stream is an internal sentinel
 							// and must never be serialised as a real HTTP status code.
-							static const std::string sse_headers =
+							// Build SSE headers, including any extra headers set on the reply (e.g. CORS).
+							// Deduplicate against the fixed headers above, and guard against CRLF injection.
+							std::string sse_headers =
 								"HTTP/1.1 200 OK\r\n"
 								"Content-Type: text/event-stream\r\n"
 								"Cache-Control: no-cache\r\n"
 								"Connection: keep-alive\r\n"
 								"Transfer-Encoding: chunked\r\n"
-								"X-Accel-Buffering: no\r\n"
-								"\r\n";
+								"X-Accel-Buffering: no\r\n";
+							std::set<std::string> emitted_headers = {
+								"content-type", "cache-control", "connection",
+								"transfer-encoding", "x-accel-buffering"
+							};
+							for (const auto& h : reply_.headers)
+							{
+								if (h.name.find_first_of("\r\n") != std::string::npos ||
+									h.value.find_first_of("\r\n") != std::string::npos)
+									continue;
+								std::string lower_name = boost::to_lower_copy(h.name);
+								if (emitted_headers.insert(lower_name).second)
+									sse_headers += h.name + ": " + h.value + "\r\n";
+							}
+							sse_headers += "\r\n";
 							MyWrite(sse_headers);
 
 							connection_type = ConnectionType::connection_sse;
