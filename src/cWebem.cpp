@@ -2283,7 +2283,7 @@ namespace http {
 							}
 							else
 							{	// Clear the session as we could be in a Trusted Network BUT have invalid Basic Auth
-								if (m_logger) m_logger->Debug(DebugCategory::Auth, "[Auth Check] Invalid Basic Authorization for API call!");
+								if (m_logger) m_logger->Log(LogLevel::Error, "Failed login attempt from %s for user '%s' (API)", session.remote_host.c_str(), _ah.user.c_str());
 								session.username = "";
 								session.rights = URIGHTS_NONE;
 								return false;
