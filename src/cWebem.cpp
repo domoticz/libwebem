@@ -1165,21 +1165,30 @@ namespace http {
 		{
 			if (sessionId.empty())
 				return;
-			WebEmSession* memSession = GetSession(sessionId);
-			if (memSession == nullptr)
-				return;
-			time_t now = utils::webem_time();
-			if (memSession->expires - (SHORT_SESSION_TIMEOUT / 2) < now)
+			time_t newExpires = 0;
 			{
-				memSession->expires = now + SHORT_SESSION_TIMEOUT;
-				if (mySessionStore != nullptr)
-					mySessionStore->RenewSessionExpiration(sessionId, memSession->expires);
+				std::unique_lock<std::mutex> lock(m_sessionsMutex);
+				auto it = m_sessions.find(sessionId);
+				if (it == m_sessions.end())
+					return;
+				time_t now = utils::webem_time();
+				if (it->second.expires - (SHORT_SESSION_TIMEOUT / 2) < now)
+				{
+					newExpires = now + SHORT_SESSION_TIMEOUT;
+					it->second.expires = newExpires;
+				}
+				else if ((it->second.expires > SHORT_SESSION_TIMEOUT + now) && (it->second.expires - (LONG_SESSION_TIMEOUT / 2) < now))
+				{
+					newExpires = now + LONG_SESSION_TIMEOUT;
+					it->second.expires = newExpires;
+				}
 			}
-			else if ((memSession->expires > SHORT_SESSION_TIMEOUT + now) && (memSession->expires - (LONG_SESSION_TIMEOUT / 2) < now))
+			if (newExpires != 0 && mySessionStore != nullptr)
 			{
-				memSession->expires = now + LONG_SESSION_TIMEOUT;
-				if (mySessionStore != nullptr)
-					mySessionStore->RenewSessionExpiration(sessionId, memSession->expires);
+				auto store = mySessionStore;
+				boost::asio::post(m_io_context, [store, sessionId, newExpires]() {
+					store->RenewSessionExpiration(sessionId, newExpires);
+				});
 			}
 		}
 
