@@ -574,11 +574,11 @@ namespace http {
 								"Content-Type: text/event-stream\r\n"
 								"Cache-Control: no-cache\r\n"
 								"Connection: keep-alive\r\n"
-								"Transfer-Encoding: chunked\r\n"
 								"X-Accel-Buffering: no\r\n";
 							std::set<std::string> emitted_headers = {
 								"content-type", "cache-control", "connection",
-								"transfer-encoding", "x-accel-buffering"
+								"transfer-encoding", "x-accel-buffering",
+								"content-length"  // SSE has no fixed body length; suppress any Content-Length added by page handlers
 							};
 							for (const auto& h : reply_.headers)
 							{
@@ -775,6 +775,12 @@ namespace http {
 			if (!error && keepalive_ && (connection_type == ConnectionType::connection_websocket)) {
 				// For WebSockets that requested keep-alive, use a Server side Ping
 				websocket_parser.SendPing();
+			}
+			else if (!error && keepalive_ && (connection_type == ConnectionType::connection_sse)) {
+				// SSE clients never send data, so the read timer must not close the connection.
+				// Send a comment line as a keepalive and reschedule the timer.
+				MyWrite(": keepalive\n\n");
+				reset_read_timeout();
 			}
 			else if (!error)
 			{
