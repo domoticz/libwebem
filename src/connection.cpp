@@ -779,6 +779,7 @@ namespace http {
 			else if (!error && keepalive_ && (connection_type == ConnectionType::connection_sse)) {
 				// SSE clients never send data, so the read timer must not close the connection.
 				// Send a comment line as a keepalive and reschedule the timer.
+				// Both MyWrite and reset_read_timeout run on the io_context strand, so no race.
 				MyWrite(": keepalive\n\n");
 				reset_read_timeout();
 			}
