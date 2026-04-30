@@ -2537,7 +2537,12 @@ namespace http {
 				// auth lookup — the handler receives an unauthenticated session and must not
 				// process user data.
 				if (myWebem->DispatchPageOptions(session, req, rep))
+				{
+					reply::add_header_if_absent(&rep, "Access-Control-Allow-Origin", "*");
+					reply::add_header_if_absent(&rep, "Access-Control-Allow-Methods", "GET, POST");
+					reply::add_header_if_absent(&rep, "Access-Control-Allow-Headers", "Authorization, Content-Type");
 					return;
+				}
 				reply::add_header(&rep, "Content-Length", "0");
 				reply::add_header(&rep, "Content-Type", "text/plain");
 				reply::add_header(&rep, "Access-Control-Max-Age", "3600");
