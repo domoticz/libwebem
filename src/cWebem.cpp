@@ -651,7 +651,7 @@ namespace http {
 			return false;
 		}
 
-		bool cWebem::DispatchPageOptions(WebEmSession& session, const request& req, reply& rep)
+		bool cWebem::DispatchPageOptions(const request& req)
 		{
 			std::string request_path;
 			request_handler::url_decode(req.uri, request_path);
@@ -661,29 +661,8 @@ namespace http {
 			if (paramPos != std::string::npos)
 				request_path = request_path.substr(0, paramPos);
 
-			webem_page_function pageFun;
-			{
-				std::lock_guard<std::mutex> lock(m_configMutex);
-				auto pfun = myPages.find(request_path);
-				if (pfun == myPages.end())
-					return false;
-				pageFun = pfun->second;
-			}
-			try
-			{
-				pageFun(session, req, rep);
-			}
-			catch (std::exception& e)
-			{
-				if (m_logger) m_logger->Log(LogLevel::Error, "[web:%s] OPTIONS dispatch exception: '%s'", GetPort().c_str(), e.what());
-				rep = reply::stock_reply(reply::internal_server_error);
-			}
-			catch (...)
-			{
-				if (m_logger) m_logger->Log(LogLevel::Error, "[web:%s] OPTIONS dispatch unknown exception", GetPort().c_str());
-				rep = reply::stock_reply(reply::internal_server_error);
-			}
-			return true;
+			std::lock_guard<std::mutex> lock(m_configMutex);
+			return myPages.find(request_path) != myPages.end();
 		}
 
 		bool cWebem::IsPageOverride(const request& req, reply& rep)
@@ -2532,11 +2511,10 @@ namespace http {
 			// 4) Respond to CORS Preflight request (for JSON API)
 			if (req.method == "OPTIONS")
 			{
-				// Route preflight to registered page handlers so they can declare their own
-				// CORS requirements. Uses a direct dispatch that skips parameter parsing and
-				// auth lookup — the handler receives an unauthenticated session and must not
-				// process user data.
-				if (myWebem->DispatchPageOptions(session, req, rep))
+				// Check if a registered page handler exists for this preflight path.
+				// Handlers are not invoked — just existence is checked so the caller
+				// can return 200 + CORS headers without executing API logic.
+				if (myWebem->DispatchPageOptions(req))
 				{
 					reply::add_header_if_absent(&rep, "Access-Control-Allow-Origin", "*");
 					reply::add_header_if_absent(&rep, "Access-Control-Allow-Methods", "GET, POST");

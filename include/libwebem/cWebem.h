@@ -158,7 +158,7 @@ namespace http
 			void Stop();
 
 			void RegisterPageCode(const char *pageurl, const webem_page_function &fun, bool bypassAuthentication = false);
-			bool DispatchPageOptions(WebEmSession& session, const request& req, reply& rep);
+			bool DispatchPageOptions(const request& req);
 
 			void RegisterActionCode(const char *idname, const webem_action_function &fun);
 
