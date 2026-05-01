@@ -928,6 +928,14 @@ namespace http {
 			m_userpasswords.push_back(wtmp);
 		}
 
+		void cWebem::RemoveUserPassword(unsigned long ID)
+		{
+			std::lock_guard<std::mutex> lock(m_configMutex);
+			m_userpasswords.erase(std::remove_if(m_userpasswords.begin(), m_userpasswords.end(),
+				[ID](const _tWebUserPassword &u) { return u.ID == ID; }),
+				m_userpasswords.end());
+		}
+
 		void cWebem::ClearUserPasswords()
 		{
 			{
@@ -1602,7 +1610,12 @@ namespace http {
 							expected_issuer = "https://" + std::string(host_header) + "/";
 						}
 
-						auto JWTverifyer = jwt::verify().with_issuer(expected_issuer).with_audience(clientid);
+						// Access tokens (subject "at:<id>") are host-independent bearer tokens;
+						// skip issuer validation so they work regardless of which address is used to reach the server.
+						bool isAccessToken = JWTsubject.size() > 3 && JWTsubject.compare(0, 3, "at:") == 0;
+						auto JWTverifyer = isAccessToken
+							? jwt::verify().with_audience(clientid)
+							: jwt::verify().with_issuer(expected_issuer).with_audience(clientid);
 						if (JWTalgo.compare("HS256") == 0)
 						{
 							JWTverifyer.allow_algorithm(jwt::algorithm::hs256{ signingsecret });
@@ -1640,7 +1653,9 @@ namespace http {
 							{
 								if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Trying legacy verification with client_password");
 								std::error_code legacy_ec;
-								auto LegacyVerifyer = jwt::verify().with_issuer(expected_issuer).with_audience(clientid);
+								auto LegacyVerifyer = isAccessToken
+									? jwt::verify().with_audience(clientid)
+									: jwt::verify().with_issuer(expected_issuer).with_audience(clientid);
 								if (JWTalgo.compare("HS256") == 0)
 								{
 									LegacyVerifyer.allow_algorithm(jwt::algorithm::hs256{ client_password });

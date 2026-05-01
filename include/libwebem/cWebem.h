@@ -180,6 +180,7 @@ namespace http
 			void SetWebTheme(const std::string &themename);
 			void SetWebRoot(const std::string &webRoot);
 			void AddUserPassword(unsigned long ID, const std::string &username, const std::string &password, const std::string &mfatoken, const std::string &passkeys, _eUserRights userrights, int activetabs, const std::string &privkey = "", const std::string &pubkey = "", uint32_t refreshexpire = 0, const std::string &signingsecret = "", time_t accept_legacy_until = 0);
+			void RemoveUserPassword(unsigned long ID);
 			std::string ExtractRequestPath(const std::string &original_request_path);
 			bool IsBadRequestPath(const std::string &original_request_path);
 
