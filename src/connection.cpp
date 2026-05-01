@@ -572,6 +572,7 @@ namespace http {
 							std::string sse_headers =
 								"HTTP/1.1 200 OK\r\n"
 								"Content-Type: text/event-stream\r\n"
+								"Transfer-Encoding: chunked\r\n"
 								"Cache-Control: no-cache\r\n"
 								"Connection: keep-alive\r\n"
 								"X-Accel-Buffering: no\r\n";

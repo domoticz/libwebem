@@ -159,6 +159,7 @@ namespace http
 
 			void RegisterPageCode(const char *pageurl, const webem_page_function &fun, bool bypassAuthentication = false);
 			bool DispatchPageOptions(const request& req);
+			void RegisterOptionsCode(const char *pageurl, const webem_page_function &fun);
 
 			void RegisterActionCode(const char *idname, const webem_action_function &fun);
 
@@ -327,6 +328,8 @@ namespace http
 			std::map<std::string, webem_action_function> myActions;
 			/// store name walue pairs for form submit action
 			std::map<std::string, webem_page_function> myPages;
+			/// store map of custom OPTIONS handlers (for endpoints needing non-default CORS headers)
+			std::map<std::string, webem_page_function> myOptionsHandlers;
 
 			void CleanSessions();
 			bool sumProxyHeader(const std::string &sHeader, const request &req, std::vector<std::string> &vHeaderLines);

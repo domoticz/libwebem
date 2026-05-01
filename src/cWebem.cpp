@@ -665,6 +665,12 @@ namespace http {
 			return myPages.find(request_path) != myPages.end();
 		}
 
+		void cWebem::RegisterOptionsCode(const char *pageurl, const webem_page_function &fun)
+		{
+			std::lock_guard<std::mutex> lock(m_configMutex);
+			myOptionsHandlers[std::string(pageurl)] = fun;
+		}
+
 		bool cWebem::IsPageOverride(const request& req, reply& rep)
 		{
 			std::string request_path;
@@ -2511,11 +2517,27 @@ namespace http {
 			// 4) Respond to CORS Preflight request (for JSON API)
 			if (req.method == "OPTIONS")
 			{
+				// If the endpoint has a custom OPTIONS handler, call it (e.g. MCP needs extra headers).
+				{
+					std::string opts_path = request_path;
+					size_t paramPos = opts_path.find_first_of('?');
+					if (paramPos != std::string::npos)
+						opts_path = opts_path.substr(0, paramPos);
+					std::lock_guard<std::mutex> lock(myWebem->m_configMutex);
+					auto it = myWebem->myOptionsHandlers.find(opts_path);
+					if (it != myWebem->myOptionsHandlers.end())
+					{
+						it->second(session, req, rep);
+						return;
+					}
+				}
 				// Check if a registered page handler exists for this preflight path.
 				// Handlers are not invoked — just existence is checked so the caller
 				// can return 200 + CORS headers without executing API logic.
 				if (myWebem->DispatchPageOptions(req))
 				{
+					reply::add_header(&rep, "Content-Length", "0");
+					reply::add_header(&rep, "Access-Control-Max-Age", "3600");
 					reply::add_header_if_absent(&rep, "Access-Control-Allow-Origin", "*");
 					reply::add_header_if_absent(&rep, "Access-Control-Allow-Methods", "GET, POST");
 					reply::add_header_if_absent(&rep, "Access-Control-Allow-Headers", "Authorization, Content-Type");
