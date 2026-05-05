@@ -668,23 +668,23 @@ namespace http {
 					break;
 				case ConnectionType::connection_websocket:
 				case ConnectionType::connection_websocket_closing:
-					begin = static_cast<const char*>(_buf.data().data());
-					result = websocket_parser.parse((const unsigned char*)begin, _buf.size(), bytes_consumed, keepalive_);
-					_buf.consume(bytes_consumed);
-					if (result) {
-						// we received a complete packet (that was handled already)
-						if (keepalive_) {
-							read_more();
-						}
-						else {
-							// a connection close control packet was received
-							// todo: wait for writeQ to flush?
-							connection_type = ConnectionType::connection_websocket_closing;
-						}
-					}
-					else // if (!result)
-					{
+					// Drain all complete frames from the buffer before yielding back to
+					// the async read loop. Without this loop, bursts of frames that all
+					// arrive in a single async_read_some callback leave frames 2..N stuck
+					// in _buf until the next byte arrives from the network.
+					do {
+						begin = static_cast<const char*>(_buf.data().data());
+						result = websocket_parser.parse((const unsigned char*)begin, _buf.size(), bytes_consumed, keepalive_);
+						_buf.consume(bytes_consumed);
+					} while (keepalive_ && bytes_consumed > 0 && _buf.size() > 0);
+
+					if (keepalive_) {
 						read_more();
+					}
+					else {
+						// a connection close control packet was received
+						// todo: wait for writeQ to flush?
+						connection_type = ConnectionType::connection_websocket_closing;
 					}
 					break;
 				}
