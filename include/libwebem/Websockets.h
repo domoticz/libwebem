@@ -63,8 +63,8 @@ namespace http
 			std::shared_ptr<IWebsocketHandler> DetachHandler();
 
 		      private:
-			virtual void OnReceiveText(const std::string &packet_data);
-			virtual void OnReceiveBinary(const std::string &packet_data);
+			virtual bool OnReceiveText(const std::string &packet_data);
+			virtual bool OnReceiveBinary(const std::string &packet_data);
 			virtual void OnPong(const std::string &packet_data);
 			virtual void SendPong(const std::string &packet_data);
 			std::string packet_data;

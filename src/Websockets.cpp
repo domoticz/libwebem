@@ -193,11 +193,17 @@ namespace http {
 					return false;
 					break;
 				case opcode_text:
-					OnReceiveText(packet_data);
+					if (!OnReceiveText(packet_data)) {
+						keep_alive = false;
+						return false;
+					}
 					return true;
 					break;
 				case opcode_binary:
-					OnReceiveBinary(packet_data);
+					if (!OnReceiveBinary(packet_data)) {
+						keep_alive = false;
+						return false;
+					}
 					return true;
 					break;
 				case opcode_close:
@@ -225,17 +231,20 @@ namespace http {
 		// re-used from the proxy client
 		// note: We mimic a web request here. This is just for testing purposes to see
 		//       if everything works. We need a proper implementation here.
-		void CWebsocket::OnReceiveText(const std::string &packet_data)
+		bool CWebsocket::OnReceiveText(const std::string &packet_data)
 		{
-			if (m_handler) m_handler->Handle(packet_data, false);
+			if (m_handler && !m_handler->Handle(packet_data, false))
+			{
+				SendClose("");
+				return false;
+			}
+			return true;
 		}
 
-		void CWebsocket::OnReceiveBinary(const std::string &packet_data)
+		bool CWebsocket::OnReceiveBinary(const std::string &packet_data)
 		{
-			// we assume we received a gzipped json request
-			// todo: unzip the data
 			const std::string &the_data = packet_data;
-			OnReceiveText(the_data);
+			return OnReceiveText(the_data);
 		}
 
 		void CWebsocket::SendPing()
