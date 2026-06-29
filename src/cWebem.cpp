@@ -2608,8 +2608,8 @@ namespace http {
 			// 8) Check if this is an upgrade request to a websocket connection
 			bool isUpgradeRequest = is_upgrade_request(session, req, rep);
 
-			// 9) Check if the request needs to be authenticated, only for pages (and actions)
-			bool needsAuthentication = (isPage ? !CheckAuthByPass(req) : false);
+			// 9) Check if the request needs to be authenticated, for pages (and actions) and WebSocket upgrades
+			bool needsAuthentication = ((isPage || isUpgradeRequest) ? !CheckAuthByPass(req) : false);
 
 			if (m_logger) m_logger->Debug(DebugCategory::Auth,"[web:%s] isPage %d isAction %d isUpgrade %d needsAuthentication %d isAuthenticated %d (%s) isNew %d", myWebem->GetPort().c_str(), isPage, isAction, isUpgradeRequest, needsAuthentication, isAuthenticated, session.username.c_str(), session.isnew);
 
