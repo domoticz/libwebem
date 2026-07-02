@@ -11,6 +11,7 @@
 #include <libwebem/request_parser.h>
 #include <libwebem/request.h>
 #include <algorithm>
+#include <cstdlib>
 
 namespace http {
 namespace server {
@@ -299,13 +300,18 @@ boost::tribool request_parser::consume(request& req, const char* &pInput, const 
 			  std::transform(hname.begin(), hname.end(), hname.begin(), ::tolower);
 			  if (hname == "content-length")
 			  {
-				  req.content_length = atoi(ph.value.c_str());
-				  // Reject excessively large requests early (100 MB max)
-				  constexpr int MAX_CONTENT_LENGTH = 100 * 1024 * 1024;
-				  if (req.content_length > MAX_CONTENT_LENGTH)
+				  // Parse strictly: reject non-numeric, negative, or out-of-range values.
+				  // A negative/malformed length previously flowed into
+				  // std::string(pInput, content_length) as a huge size_t -> crash (DoS).
+				  const char *cl_cstr = ph.value.c_str();
+				  char *cl_endp = nullptr;
+				  long cl_parsed = std::strtol(cl_cstr, &cl_endp, 10);
+				  constexpr long MAX_CONTENT_LENGTH = 100L * 1024 * 1024; // 100 MB max
+				  if (cl_endp == cl_cstr || *cl_endp != '\0' || cl_parsed < 0 || cl_parsed > MAX_CONTENT_LENGTH)
 				  {
-					  return false; // Request rejected - too large
+					  return false; // Request rejected - invalid or too large
 				  }
+				  req.content_length = static_cast<int>(cl_parsed);
 				  break;
 			  }
 		  }

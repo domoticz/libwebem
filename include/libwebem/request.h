@@ -12,6 +12,9 @@
 #define HTTP_REQUEST_H
 
 #include <string>
+#include <vector>
+#include <map>
+#include <cctype>
 #include "header.h"
 
 namespace http {

@@ -104,7 +104,29 @@ namespace utils {
 
     /// Compute MD5 hash of InputString concatenated with Salt.
     /// Requires OpenSSL (libcrypto).
+    /// NOTE: MD5 is cryptographically weak and is retained ONLY for backwards
+    /// compatibility with stored credentials (HTTP Digest / legacy password
+    /// hashes). Do not use it for new secret hashing; use GenerateSHA256Hash.
     std::string GenerateMD5Hash(const std::string& InputString, const std::string& Salt = "");
+
+    /// Compute SHA-256 hash (lowercase hex) of InputString concatenated with Salt.
+    /// Requires OpenSSL (libcrypto).
+    std::string GenerateSHA256Hash(const std::string& InputString, const std::string& Salt = "");
+
+    /// Generate a cryptographically secure random token as a lowercase hex string.
+    /// nbytes is the number of random bytes drawn (default 32 = 256 bits); the
+    /// returned string is 2*nbytes hex characters. Backed by OpenSSL RAND_bytes.
+    /// Returns an empty string if the CSPRNG fails (callers must treat empty as failure).
+    std::string GenerateSecureToken(size_t nbytes = 32);
+
+    /// Constant-time comparison of two strings. Returns true if they are equal.
+    /// The running time does not depend on the position of the first differing
+    /// byte, preventing timing side-channels when comparing secrets/hashes.
+    bool ConstantTimeEquals(const std::string& a, const std::string& b);
+
+    /// Returns true if s contains any ASCII control character (0x00-0x1F or 0x7F),
+    /// including an embedded NUL. Used to reject malformed/decoded request paths.
+    bool contains_control_chars(const std::string& s);
 
     /// Cross-platform gettimeofday replacement.
     /// On POSIX, delegates to ::gettimeofday(). On Windows, uses GetSystemTimeAsFileTime().

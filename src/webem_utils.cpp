@@ -22,7 +22,11 @@
 #include <cstring>
 #include <random>
 #include <thread>
+#include <memory>
+#include <vector>
 #include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <openssl/crypto.h>
 
 namespace http {
 namespace server {
@@ -194,6 +198,66 @@ std::string GenerateMD5Hash(const std::string& InputString, const std::string& S
         std::snprintf(&mdString[i * 2], 3, "%02x", static_cast<unsigned int>(digest[i]));
 
     return mdString;
+}
+
+std::string GenerateSHA256Hash(const std::string& InputString, const std::string& Salt)
+{
+    std::string cstring = InputString + Salt;
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int hash_length = 0;
+
+    auto ctx = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>(
+        EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    if (!ctx)
+        return {};
+
+    EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr);
+    EVP_DigestUpdate(ctx.get(), cstring.c_str(), cstring.size());
+    EVP_DigestFinal_ex(ctx.get(), digest, &hash_length);
+
+    char out[(EVP_MAX_MD_SIZE * 2) + 1];
+    out[hash_length * 2] = '\0';
+    for (unsigned int i = 0; i < hash_length; i++)
+        std::snprintf(&out[i * 2], 3, "%02x", static_cast<unsigned int>(digest[i]));
+
+    return out;
+}
+
+std::string GenerateSecureToken(size_t nbytes)
+{
+    if (nbytes == 0)
+        nbytes = 32;
+    std::vector<unsigned char> buf(nbytes);
+    if (RAND_bytes(buf.data(), static_cast<int>(nbytes)) != 1)
+        return {}; // CSPRNG failure - caller must treat empty result as an error
+
+    static const char* hexchars = "0123456789abcdef";
+    std::string out;
+    out.reserve(nbytes * 2);
+    for (unsigned char c : buf)
+    {
+        out.push_back(hexchars[c >> 4]);
+        out.push_back(hexchars[c & 0x0F]);
+    }
+    return out;
+}
+
+bool ConstantTimeEquals(const std::string& a, const std::string& b)
+{
+    // Length is not itself secret for the fixed-size hashes/tokens we compare,
+    // so an early length check is acceptable and required by CRYPTO_memcmp.
+    if (a.size() != b.size())
+        return false;
+    if (a.empty())
+        return true;
+    return CRYPTO_memcmp(a.data(), b.data(), a.size()) == 0;
+}
+
+bool contains_control_chars(const std::string& s)
+{
+    return std::any_of(s.begin(), s.end(), [](unsigned char c) {
+        return c < 0x20 || c == 0x7F;
+    });
 }
 
 } // namespace utils

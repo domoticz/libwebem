@@ -883,9 +883,12 @@ namespace http {
 
 		bool cWebem::IsBadRequestPath(const std::string& request_path)
 		{
-			// Request path must be absolute and not contain "..".
+			// Request path must be absolute, must not contain "..", and must not
+			// contain control characters (including an embedded NUL from "%00",
+			// which would truncate the path when passed to filesystem calls).
 			if (request_path.empty() || request_path[0] != '/'
-				|| request_path.find("..") != std::string::npos)
+				|| request_path.find("..") != std::string::npos
+				|| utils::contains_control_chars(request_path))
 			{
 				return true;
 			}
@@ -1734,7 +1737,7 @@ namespace http {
 		int cWebemRequestHandler::check_password(struct ah *ah, const std::string &ha1)
 		{
 			if ((ah->nonce.empty()) && (!ah->response.empty()))
-				return (ha1 == utils::GenerateMD5Hash(ah->response));
+				return utils::ConstantTimeEquals(ha1, utils::GenerateMD5Hash(ah->response)) ? 1 : 0;
 
 			return 0;
 		}
@@ -1850,10 +1853,15 @@ namespace http {
 
 		std::string cWebemRequestHandler::generateSessionID()
 		{
-			// Session id should not be predictable
-			std::string randomValue = utils::generate_uuid();
-
-			std::string sessionId = utils::GenerateMD5Hash(base64_encode(randomValue));
+			// Session id must not be predictable: use a cryptographically secure RNG.
+			std::string sessionId = utils::GenerateSecureToken(32);
+			if (sessionId.empty())
+			{
+				// RAND_bytes failed (should never happen); fail loudly rather than
+				// falling back to a weak/predictable value.
+				if (m_logger) m_logger->Log(LogLevel::Error, "[web:%s] Unable to generate a secure session id (CSPRNG failure)!", myWebem->GetPort().c_str());
+				return {};
+			}
 
 			if (m_logger) m_logger->Debug(DebugCategory::WebServer, "[web:%s] generate new session id token (%s)", myWebem->GetPort().c_str(), sessionId.c_str());
 
@@ -1862,10 +1870,13 @@ namespace http {
 
 		std::string cWebemRequestHandler::generateAuthToken(const WebEmSession & session, const request & req)
 		{
-			// Authentication token should not be predictable
-			std::string randomValue = utils::generate_uuid();
-
-			std::string authToken = base64_encode(randomValue);
+			// Authentication token must not be predictable: use a cryptographically secure RNG.
+			std::string authToken = utils::GenerateSecureToken(32);
+			if (authToken.empty())
+			{
+				if (m_logger) m_logger->Log(LogLevel::Error, "[web:%s] Unable to generate a secure authentication token (CSPRNG failure)!", myWebem->GetPort().c_str());
+				return {};
+			}
 
 			if (m_logger) m_logger->Debug(DebugCategory::WebServer, "[web:%s] generate new authentication token (%s) for user (%s)", myWebem->GetPort().c_str(), authToken.c_str(), session.username.c_str());
 
@@ -1874,7 +1885,7 @@ namespace http {
 			{
 				WebEmStoredSession storedSession;
 				storedSession.id = session.id;
-				storedSession.auth_token = utils::GenerateMD5Hash(authToken); // only save the hash to avoid a security issue if database is stolen
+				storedSession.auth_token = utils::GenerateSHA256Hash(authToken); // only save the hash to avoid a security issue if database is stolen
 				storedSession.username = session.username;
 				storedSession.expires = session.expires;
 				storedSession.remote_host = session.remote_host; // to trace host
@@ -1893,6 +1904,9 @@ namespace http {
 			std::stringstream sstr;
 			sstr << cookieName << "=" << session.id << "_" << session.auth_token << "." << session.expires;
 			sstr << "; HttpOnly; SameSite=strict; path=/";
+			// Only send the session cookie over encrypted transport when the server is TLS-enabled.
+			if (myWebem->m_settings.is_secure())
+				sstr << "; Secure";
 			// Only set Expires for "remember me" (long-lived) sessions.
 			// Short sessions use a browser session cookie (no Expires) so the browser keeps
 			// sending it until it is closed, while the server enforces the actual inactivity
@@ -1911,7 +1925,10 @@ namespace http {
 			std::stringstream sstr;
 			sstr << cookieName << "=none";
 			// Omitting path=/ allows simultaneous logins to multiple instances on the same host.
-			sstr << "; HttpOnly; SameSite=strict; Expires=" << utils::make_web_time(0);
+			sstr << "; HttpOnly; SameSite=strict";
+			if (myWebem->m_settings.is_secure())
+				sstr << "; Secure";
+			sstr << "; Expires=" << utils::make_web_time(0);
 			reply::add_header(&rep, "Set-Cookie", sstr.str(), false);
 		}
 
@@ -2367,8 +2384,10 @@ namespace http {
 			session_store_impl_ptr sstore = myWebem->GetSessionStore();
 			if (sstore == nullptr)
 			{
-				if (m_logger) m_logger->Log(LogLevel::Error, "CheckAuthToken(%s_%s) : no store defined", session.id.c_str(), session.auth_token.c_str());
-				return true;
+				// Fail closed: without a session store we cannot verify the token,
+				// so the request must NOT be treated as authenticated.
+				if (m_logger) m_logger->Log(LogLevel::Error, "CheckAuthToken(%s_%s) : no store defined, rejecting", session.id.c_str(), session.auth_token.c_str());
+				return false;
 			}
 
 			if (session.id.empty() || session.auth_token.empty())
@@ -2382,7 +2401,7 @@ namespace http {
 				if (m_logger) m_logger->Debug(DebugCategory::Auth, "[web:%s] CheckAuthToken(%s_%s) : session id not found", myWebem->GetPort().c_str(), session.id.c_str(), session.auth_token.c_str());
 				return false;
 			}
-			if (storedSession.auth_token != utils::GenerateMD5Hash(session.auth_token))
+			if (!utils::ConstantTimeEquals(storedSession.auth_token, utils::GenerateSHA256Hash(session.auth_token)))
 			{
 				if (m_logger) m_logger->Log(LogLevel::Error, "CheckAuthToken(%s_%s) : auth token mismatch", session.id.c_str(), session.auth_token.c_str());
 				removeAuthToken(session.id);
@@ -2723,6 +2742,12 @@ namespace http {
 				{
 					// Create a new session ID
 					session.id = generateSessionID();
+					if (session.id.empty())
+					{
+						// CSPRNG failure: never create a half-initialized session
+						rep = reply::stock_reply(reply::internal_server_error);
+						return;
+					}
 					session.expires = utils::webem_time() + SHORT_SESSION_TIMEOUT;
 					if (session.rememberme)
 					{
@@ -2730,6 +2755,12 @@ namespace http {
 						session.expires += LONG_SESSION_TIMEOUT;
 					}
 					session.auth_token = generateAuthToken(session, req); // do it after expires to save it also
+					if (session.auth_token.empty())
+					{
+						// CSPRNG failure: abort the login rather than issue an empty token
+						rep = reply::stock_reply(reply::internal_server_error);
+						return;
+					}
 					session.isnew = false;
 					myWebem->AddSession(session);
 					send_cookie(rep, session);

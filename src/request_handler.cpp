@@ -264,8 +264,10 @@ void request_handler::handle_request(const request &req, reply &rep, modify_info
 			if ((iStat == 0) && ((sb.st_mode & S_IFDIR) == S_IFDIR))
 			{
 				// If it is a directory, make sure that the request path ends with a slash
-				// So the browser will not get confused with the relative paths
-				if (request_path[request_path.size() - 1] == '/')
+				// So the browser will not get confused with the relative paths.
+				// Guard against an empty request_path (e.g. request equal to the web root),
+				// where request_path.size() - 1 would wrap and index out of bounds.
+				if (!request_path.empty() && request_path.back() == '/')
 				{
 					full_path += "index.html";
 					if (m_logger) m_logger->Debug(DebugCategory::WebServer, "[web:%s] modified to (%s).", request_path.c_str(), full_path.c_str());

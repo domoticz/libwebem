@@ -2,8 +2,16 @@
 #include "fastcgi.h"
 #include <fstream>
 #include <sstream>
+#include <vector>
+#include <map>
 #include "url_encode.h"
 #include <libwebem/webem_utils.h>
+
+#ifndef WIN32
+#include <unistd.h>
+#include <sys/wait.h>
+extern char **environ;
+#endif
 
 //(c) 2016 GizMoCuz
 
@@ -120,46 +128,184 @@ struct _tFCGI_UnknownTypeRecord {
 	_tFCGI_UnknownTypeBody body;
 };
 
-std::vector<char> ExecuteCommandAndReturnRaw(const std::string &szCommand)
+#ifdef WIN32
+// Quote a single argument according to the rules used by the Microsoft C runtime
+// argv parser, so it survives CreateProcess without any shell interpretation.
+static std::string Win32QuoteArg(const std::string &arg)
 {
-	std::vector<char> myData;
-	try
+	if (!arg.empty() && arg.find_first_of(" \t\n\v\"") == std::string::npos)
+		return arg;
+	std::string q = "\"";
+	for (size_t i = 0;; ++i)
 	{
-		FILE *fp;
-
-		/* Open the command for reading. */
-#ifdef WIN32
-		fp = _popen(szCommand.c_str(), "r");
-#else
-		fp = popen(szCommand.c_str(), "r");
-#endif
-		if (fp != nullptr)
+		unsigned num_backslashes = 0;
+		while (i < arg.size() && arg[i] == '\\')
 		{
-			for (;;) {
-				const int BufferSize = 1024;
-
-				const size_t oldSize = myData.size();
-				myData.resize(myData.size() + BufferSize);        
-
-				const size_t bytesRead = fread(&myData[oldSize], 1, BufferSize,fp);
-				myData.resize(oldSize + bytesRead);
-
-				if (bytesRead == 0) {
-					break;
-				}
-			}
-			/* close */
-#ifdef WIN32
-			_pclose(fp);
-#else
-			pclose(fp);
-#endif
+			++i;
+			++num_backslashes;
+		}
+		if (i == arg.size())
+		{
+			q.append(num_backslashes * 2, '\\');
+			break;
+		}
+		if (arg[i] == '"')
+		{
+			q.append(num_backslashes * 2 + 1, '\\');
+			q.push_back('"');
+		}
+		else
+		{
+			q.append(num_backslashes, '\\');
+			q.push_back(arg[i]);
 		}
 	}
-	catch (...)
-	{
+	q.push_back('"');
+	return q;
+}
+#endif
 
+// Execute a child process directly, WITHOUT going through a shell, capturing its
+// stdout. The executable and its arguments are passed as a discrete argv array and
+// all request-controlled data is passed through the child environment, so shell
+// metacharacters can never be interpreted as commands (prevents command injection).
+std::vector<char> ExecuteProcessAndReturnRaw(const std::string &exePath,
+											 const std::vector<std::string> &args,
+											 const std::map<std::string, std::string> &extraEnv)
+{
+	std::vector<char> myData;
+#ifdef WIN32
+	// Build the command line with per-argument quoting (no shell parsing).
+	std::string cmdline = Win32QuoteArg(exePath);
+	for (const auto &a : args)
+	{
+		cmdline += " ";
+		cmdline += Win32QuoteArg(a);
 	}
+
+	// Build the environment block: inherit the parent environment, overlaid with
+	// the CGI variables. Double-NUL terminated, sorted map keeps it well-formed.
+	std::map<std::string, std::string> merged;
+	if (LPCH envStrings = GetEnvironmentStringsA())
+	{
+		for (LPCH p = envStrings; *p;)
+		{
+			std::string entry(p);
+			p += entry.size() + 1;
+			size_t eq = entry.find('=');
+			if (eq != std::string::npos && eq > 0)
+				merged[entry.substr(0, eq)] = entry.substr(eq + 1);
+		}
+		FreeEnvironmentStringsA(envStrings);
+	}
+	for (const auto &kv : extraEnv)
+		merged[kv.first] = kv.second;
+	std::string envBlock;
+	for (const auto &kv : merged)
+	{
+		envBlock += kv.first;
+		envBlock += "=";
+		envBlock += kv.second;
+		envBlock.push_back('\0');
+	}
+	envBlock.push_back('\0');
+
+	SECURITY_ATTRIBUTES sa{};
+	sa.nLength = sizeof(sa);
+	sa.bInheritHandle = TRUE;
+	sa.lpSecurityDescriptor = nullptr;
+
+	HANDLE hRead = nullptr, hWrite = nullptr;
+	if (!CreatePipe(&hRead, &hWrite, &sa, 0))
+		return myData;
+	SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+	STARTUPINFOA si{};
+	si.cb = sizeof(si);
+	si.dwFlags = STARTF_USESTDHANDLES;
+	si.hStdOutput = hWrite;
+	si.hStdError = hWrite;
+	si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+	PROCESS_INFORMATION pi{};
+
+	std::vector<char> cmdlineBuf(cmdline.begin(), cmdline.end());
+	cmdlineBuf.push_back('\0');
+
+	BOOL ok = CreateProcessA(exePath.c_str(), cmdlineBuf.data(), nullptr, nullptr, TRUE,
+							 0, static_cast<LPVOID>(&envBlock[0]), nullptr, &si, &pi);
+	CloseHandle(hWrite);
+	if (!ok)
+	{
+		CloseHandle(hRead);
+		return myData;
+	}
+
+	char buf[4096];
+	DWORD nread = 0;
+	while (ReadFile(hRead, buf, sizeof(buf), &nread, nullptr) && nread > 0)
+		myData.insert(myData.end(), buf, buf + nread);
+	CloseHandle(hRead);
+	WaitForSingleObject(pi.hProcess, INFINITE);
+	CloseHandle(pi.hProcess);
+	CloseHandle(pi.hThread);
+#else
+	// Build argv and envp fully in the parent, so the child only performs
+	// async-signal-safe calls between fork() and execve().
+	std::vector<std::string> argvStrings;
+	argvStrings.reserve(args.size() + 1);
+	argvStrings.push_back(exePath);
+	for (const auto &a : args)
+		argvStrings.push_back(a);
+	std::vector<char *> argv;
+	argv.reserve(argvStrings.size() + 1);
+	for (auto &s : argvStrings)
+		argv.push_back(const_cast<char *>(s.c_str()));
+	argv.push_back(nullptr);
+
+	std::vector<std::string> envStrings;
+	for (char **e = environ; e != nullptr && *e != nullptr; ++e)
+	{
+		std::string entry(*e);
+		std::string key = entry.substr(0, entry.find('='));
+		if (extraEnv.find(key) == extraEnv.end())
+			envStrings.push_back(entry);
+	}
+	for (const auto &kv : extraEnv)
+		envStrings.push_back(kv.first + "=" + kv.second);
+	std::vector<char *> envp;
+	envp.reserve(envStrings.size() + 1);
+	for (auto &s : envStrings)
+		envp.push_back(const_cast<char *>(s.c_str()));
+	envp.push_back(nullptr);
+
+	int pipefd[2];
+	if (pipe(pipefd) != 0)
+		return myData;
+	pid_t pid = fork();
+	if (pid < 0)
+	{
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return myData;
+	}
+	if (pid == 0)
+	{
+		// Child: redirect stdout to the pipe and exec directly (no shell).
+		dup2(pipefd[1], STDOUT_FILENO);
+		close(pipefd[0]);
+		close(pipefd[1]);
+		execve(exePath.c_str(), argv.data(), envp.data());
+		_exit(127); // exec failed
+	}
+	close(pipefd[1]);
+	char buf[4096];
+	ssize_t n;
+	while ((n = read(pipefd[0], buf, sizeof(buf))) > 0)
+		myData.insert(myData.end(), buf, buf + static_cast<size_t>(n));
+	close(pipefd[0]);
+	int status = 0;
+	waitpid(pid, &status, 0);
+#endif
 	return myData;
 }
 
@@ -298,21 +444,7 @@ bool fastcgi_parser::handlePHP(const server_settings &settings, const std::strin
 	request_id_++;
 
 
-	std::string str_params;
-	for (const auto &p : parameters)
-	{
-		if (!str_params.empty())
-			str_params += " ";
-
-		str_params.append(p.first);
-		str_params.append("=");
-		str_params.append(p.second);
-	}
-
-	std::string fullexecmd = settings.php_cgi_path + " " + full_path;
-	if (!str_params.empty())
-		fullexecmd = fullexecmd + " " + str_params;
-
+	// CGI variables passed to the PHP process via its environment (NOT the command line).
 	std::map<std::string, std::string> fcgi_params;
 	fcgi_params["SCRIPT_FILENAME"] = settings.www_root + script_path;
 	fcgi_params["QUERY_STRING"] = szQueryString;
@@ -334,31 +466,26 @@ bool fastcgi_parser::handlePHP(const server_settings &settings, const std::strin
 	fcgi_params["SERVER_NAME"] = "localhost";
 	fcgi_params["REDIRECT_STATUS"] = "200";
 
-
-	fullexecmd += " SERVER_SOFTWARE=" + (settings.server_name.empty() ? std::string("webem") : settings.server_name);
-	fullexecmd += " SERVER_NAME=localhost";
-	fullexecmd += " SERVER_ADDR='" + req.host_local_address + "'";
-	fullexecmd += " SERVER_PORT=" + req.host_local_port;
-	fullexecmd += " REMOTE_ADDR=" + req.host_remote_address;
-	fullexecmd += " QUERY_STRING='" + szQueryString + "'";
-
+	// Expose request headers as HTTP_* CGI variables using their raw values.
+	// These are environment values only and cannot be interpreted as commands.
 	for (const auto &header : req.headers)
 	{
 		std::string rName = "HTTP_" + header.name;
 		http::server::utils::str_replace(rName, "-", "_");
 		http::server::utils::str_upper(rName);
-		fullexecmd += " " + rName + "='" + header.value + "'";
-
-		fcgi_params[rName] = URLEncode(header.value);
+		fcgi_params[rName] = header.value;
 	}
-#ifdef WIN32
-	fullexecmd = "SET QUERY_STRING=\""+szQueryString + "\" & " + fullexecmd;
-#else
-	fullexecmd = "export QUERY_STRING='"+szQueryString + "' && " + fullexecmd;
-#endif
 
-	if (logger) logger->Debug(DebugCategory::WebServer, "[PHP] Command: %s", fullexecmd.c_str());
-	std::vector<char> v = ExecuteCommandAndReturnRaw(fullexecmd);
+	// The PHP-CGI binary receives ONLY the script path as an argument. Request
+	// parameters are read by the script from the QUERY_STRING environment
+	// variable, so they are not passed on the command line at all. This keeps
+	// attacker-controlled data off argv entirely (defence in depth on top of the
+	// no-shell spawn below).
+	std::vector<std::string> args;
+	args.push_back(full_path);
+
+	if (logger) logger->Debug(DebugCategory::WebServer, "[PHP] Executing %s (%s)", settings.php_cgi_path.c_str(), full_path.c_str());
+	std::vector<char> v = ExecuteProcessAndReturnRaw(settings.php_cgi_path, args, fcgi_params);
 	std::string pret(v.begin(), v.end());
 	if (pret.empty())
 	{

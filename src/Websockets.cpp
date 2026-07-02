@@ -1,6 +1,7 @@
 #include "webem_stdafx.h"
 #include <libwebem/Websockets.h>
 #include <json/json.h>
+#include <openssl/rand.h>
 
 #include <utility>
 
@@ -62,13 +63,17 @@ namespace http {
 				}
 			}
 			if (domasking) {
-				// masking key
+				// masking key - must be unpredictable per RFC 6455, use a CSPRNG
 				uint8_t masking_key[4];
-				for (unsigned char &i : masking_key)
+				if (RAND_bytes(masking_key, sizeof(masking_key)) != 1)
 				{
-					i = rand();
-					res += i;
+					// Extremely unlikely CSPRNG failure; fall back to a weak source
+					// rather than sending an all-zero (no-op) mask.
+					for (unsigned char &i : masking_key)
+						i = (uint8_t)rand();
 				}
+				for (unsigned char i : masking_key)
+					res += (char)i;
 				res += unmask(masking_key, (const uint8_t *)payload.c_str(), (size_t)payloadlen);
 			}
 			else {
