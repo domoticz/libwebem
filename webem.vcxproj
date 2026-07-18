@@ -102,6 +102,8 @@
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>webem_stdafx.h</PrecompiledHeaderFile>
       <WarningLevel>Level3</WarningLevel>
+      <TreatAngleIncludesAsExternal>true</TreatAngleIncludesAsExternal>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;NOMINMAX;_DEBUG;WWW_ENABLE_SSL;WITH_TLS;HAVE_SNPRINTF;BOOST_CONFIG_SUPPRESS_OUTDATED_MESSAGE;JSON_DLL;WEBSERVER_DONT_USE_ZIP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>include;src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -120,6 +122,8 @@
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>webem_stdafx.h</PrecompiledHeaderFile>
       <WarningLevel>Level3</WarningLevel>
+      <TreatAngleIncludesAsExternal>true</TreatAngleIncludesAsExternal>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;NOMINMAX;_DEBUG;WWW_ENABLE_SSL;WITH_TLS;HAVE_SNPRINTF;BOOST_CONFIG_SUPPRESS_OUTDATED_MESSAGE;JSON_DLL;WEBSERVER_DONT_USE_ZIP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>include;src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -138,6 +142,8 @@
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>webem_stdafx.h</PrecompiledHeaderFile>
       <WarningLevel>Level3</WarningLevel>
+      <TreatAngleIncludesAsExternal>true</TreatAngleIncludesAsExternal>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
@@ -158,6 +164,8 @@
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>webem_stdafx.h</PrecompiledHeaderFile>
       <WarningLevel>Level3</WarningLevel>
+      <TreatAngleIncludesAsExternal>true</TreatAngleIncludesAsExternal>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
