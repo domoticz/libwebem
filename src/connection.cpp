@@ -19,6 +19,7 @@
 #include <libwebem/cWebem.h>
 #include <libwebem/webem_utils.h>
 #include <limits>
+#include <optional>
 
 namespace http {
 	namespace server {
@@ -413,10 +414,12 @@ namespace http {
 			status_ = WAITING_READ;
 
 			// read chunks of max 4 KB
-			boost::asio::streambuf::mutable_buffers_type buf;
+			// optional because mutable_buffers_type is mutable_buffers_1 in older
+			// Boost, which has no default constructor
+			std::optional<boost::asio::streambuf::mutable_buffers_type> buf;
 			try
 			{
-				buf = _buf.prepare(kReadChunkBytes);
+				buf.emplace(_buf.prepare(kReadChunkBytes));
 			}
 			catch (const std::exception&)
 			{
@@ -441,12 +444,12 @@ namespace http {
 			if (secure_) {
 #ifdef WWW_ENABLE_SSL
 				// Perform secure read
-				sslsocket_->async_read_some(buf, [self = shared_from_this()](auto &&err, auto bytes) { self->handle_read(err, bytes); });
+				sslsocket_->async_read_some(*buf, [self = shared_from_this()](auto &&err, auto bytes) { self->handle_read(err, bytes); });
 #endif
 			}
 			else {
 				// Perform plain read
-				socket_->async_read_some(buf, [self = shared_from_this()](auto &&err, auto bytes) { self->handle_read(err, bytes); });
+				socket_->async_read_some(*buf, [self = shared_from_this()](auto &&err, auto bytes) { self->handle_read(err, bytes); });
 			}
 		}
 
