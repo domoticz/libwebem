@@ -3,6 +3,8 @@
 #include <json/json.h>
 #include <openssl/rand.h>
 
+#include <cstdint>
+#include <limits>
 #include <utility>
 
 #define FIN_MASK 0x80
@@ -54,10 +56,15 @@ namespace http {
 				}
 				else {
 					res += (uint8_t)127 | (domasking ? MASKING_MASK : 0);
+					// Widen to a fixed-width 64-bit type before shifting: payloadlen
+					// is size_t, which is only 32 bits on a 32-bit build (armhf
+					// Raspberry Pi is a first-class target), and shifting by 56/48/
+					// 40/32 bits would be undefined behaviour on a 32-bit operand.
+					uint64_t len64 = (uint64_t)payloadlen;
 					int bits = 64;
 					while (bits) {
 						bits -= 8;
-						uint8_t ch = (uint8_t)((size_t)(payloadlen >> bits) & 0xff);
+						uint8_t ch = (uint8_t)((len64 >> bits) & 0xff);
 						res += ch;
 					}
 				}
@@ -82,12 +89,12 @@ namespace http {
 			return res;
 		}
 
-		bool CWebsocketFrame::Parse(const uint8_t *bytes, size_t size) {
+		frame_parse_result CWebsocketFrame::Parse(const uint8_t *bytes, size_t size, size_t max_frame_size) {
 			uint8_t masking_key[4];
 			size_t remaining = size;
 			bytes_consumed = 0;
 			if (remaining < 2) {
-				return false;
+				return frame_parse_result::need_more_data;
 			}
 			fin = (bytes[0] & FIN_MASK) > 0;
 			rsvi1 = (bytes[0] & RSVI1_MASK) > 0;
@@ -98,56 +105,91 @@ namespace http {
 			payloadlen = (bytes[1] & PAYLOADLEN_MASK);
 			remaining -= 2;
 			size_t ptr = 2;
+
+			// No extensions are negotiated, so the reserved bits must be zero
+			// (RFC 6455 S5.2).
+			if (rsvi1 || rsvi2 || rsvi3) {
+				return frame_parse_result::protocol_error;
+			}
+			// RFC 6455 S5.1: every frame sent from client to server must be
+			// masked. Checked before the length is even decoded: an unmasked
+			// frame is malformed regardless of what it claims its length is.
+			if (!masking) {
+				return frame_parse_result::protocol_error;
+			}
+
 			if (payloadlen == 126) {
 				if (remaining < 2) {
-					return false;
+					return frame_parse_result::need_more_data;
 				}
-				payloadlen = 0;
+				uint64_t len64 = 0;
 				int bits = 16;
 				for (uint8_t i = 0; i < 2; i++) {
 					bits -= 8;
-					payloadlen += (size_t)bytes[ptr++] << bits;
+					len64 += (uint64_t)bytes[ptr++] << bits;
 					remaining--;
 				}
+				payloadlen = (size_t)len64;
 			}
 			else if (payloadlen == 127) {
 				if (remaining < 8) {
-					return false;
+					return frame_parse_result::need_more_data;
 				}
-				payloadlen = 0;
+				// Accumulate into an explicit 64-bit type: on a 32-bit build
+				// size_t is only 32 bits, and shifting by 56/48/40/32 bits
+				// would be undefined behaviour on a 32-bit operand.
+				uint64_t len64 = 0;
 				int bits = 64;
 				for (uint8_t i = 0; i < 8; i++) {
 					bits -= 8;
-					payloadlen += (size_t)bytes[ptr++] << bits;
+					len64 += (uint64_t)bytes[ptr++] << bits;
 					remaining--;
+				}
+				// Range-check the 64-bit value before narrowing to size_t: an
+				// attacker-declared length that does not fit in size_t must
+				// never reach the buffering gate below, on any build.
+				if (len64 > (uint64_t)(std::numeric_limits<size_t>::max)()) {
+					return frame_parse_result::protocol_error;
+				}
+				payloadlen = (size_t)len64;
+			}
+
+			// Reject an oversized frame immediately after decoding the length,
+			// before the "have all the bytes arrived yet" gate below --
+			// otherwise the connection buffers toward a size it will never be
+			// allowed to reach, reading a few KB at a time until an
+			// attacker-controlled 64-bit length is fully resident.
+			if ((max_frame_size > 0) && (payloadlen > max_frame_size)) {
+				return frame_parse_result::protocol_error;
+			}
+
+			// RFC 6455 S5.5: control frames must not be fragmented and must
+			// carry no more than 125 bytes of payload.
+			if (opcode >= opcode_close) {
+				if (!fin || (payloadlen > 125)) {
+					return frame_parse_result::protocol_error;
 				}
 			}
-			if (masking) {
-				if (remaining < 4) {
-					return false;
-				}
-				for (unsigned char &i : masking_key)
-				{
-					i = bytes[ptr++];
-					remaining--;
-				}
+
+			if (remaining < 4) {
+				return frame_parse_result::need_more_data;
+			}
+			for (unsigned char &i : masking_key)
+			{
+				i = bytes[ptr++];
+				remaining--;
 			}
 			if (remaining < payloadlen) {
-				return false;
+				return frame_parse_result::need_more_data;
 			}
-			if (masking) {
-				payload = unmask(masking_key, &bytes[ptr], payloadlen);
-			}
-			else {
-				payload.assign((char *)&bytes[ptr], payloadlen);
-			}
+			payload = unmask(masking_key, &bytes[ptr], payloadlen);
 			remaining -= payloadlen;
 			ptr += payloadlen;
 			bytes_consumed = ptr;
-			return true;
+			return frame_parse_result::ok;
 		};
 
-		std::string CWebsocketFrame::Payload() {
+		const std::string &CWebsocketFrame::Payload() {
 			return payload;
 		};
 
@@ -176,19 +218,47 @@ namespace http {
 			m_handler = std::move(handler);
 		}
 
+		void CWebsocket::SetLimits(size_t max_frame_size, size_t max_message_size)
+		{
+			max_frame_size_ = max_frame_size;
+			max_message_size_ = max_message_size;
+		}
+
 		boost::tribool CWebsocket::parse(const uint8_t *begin, size_t size, size_t &bytes_consumed, bool &keep_alive)
 		{
 			CWebsocketFrame frame;
-			if (!frame.Parse(begin, size)) {
+			frame_parse_result presult = frame.Parse(begin, size, max_frame_size_);
+			if (presult == frame_parse_result::need_more_data) {
 				bytes_consumed = 0;
 				return boost::indeterminate;
+			}
+			if (presult == frame_parse_result::protocol_error) {
+				// The frame itself violates RFC 6455 (oversized, reserved
+				// opcode/bits, unmasked, malformed control frame, ...). Fail the
+				// connection instead of leaving it to buffer toward a limit it
+				// will never be allowed to reach.
+				bytes_consumed = 0;
+				keep_alive = false;
+				return false;
 			}
 			bytes_consumed = frame.Consumed();
 			if (start_new_packet) {
 				packet_data.clear();
 				last_opcode = frame.Opcode();
 			}
-			packet_data += frame.Payload();
+			const std::string &frame_payload = frame.Payload();
+			// Cap the reassembled message before appending: a message is
+			// reassembled here one fragment at a time, and Parse()'s per-frame
+			// limit alone does nothing to bound how many fragments a chain of
+			// continuation frames can accumulate.
+			if ((max_message_size_ > 0) && ((packet_data.size() + frame_payload.size()) > max_message_size_)) {
+				// Mirror the protocol_error path: nothing should be credited as
+				// consumed toward a connection that is being dropped.
+				bytes_consumed = 0;
+				keep_alive = false;
+				return false;
+			}
+			packet_data += frame_payload;
 			if (frame.isFinal()) {
 				// packet is ready for packet handler
 				start_new_packet = true;
@@ -224,6 +294,19 @@ namespace http {
 					OnPong(packet_data);
 					return false;
 					break;
+				default:
+					// RFC 6455 S5.2: opcodes 0x03-0x07 and 0x0B-0x0F are reserved
+					// and carry no defined meaning. Without this case, a single
+					// reserved-opcode frame permanently wedges the state machine:
+					// start_new_packet was just set true above, but falling out
+					// of the switch without returning reaches the "wait for more
+					// fragments" code below, which sets it back to false --
+					// packet_data is then never cleared again and nothing is
+					// ever dispatched. Failing the connection here is what stops
+					// that; the caller (CWebsocket::parse's do-while drain loop
+					// in connection.cpp) then closes the connection.
+					keep_alive = false;
+					return false;
 				}
 			}
 			// packet waits for more fragments

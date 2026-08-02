@@ -9,10 +9,12 @@
 //
 #include "webem_stdafx.h"
 #include <libwebem/reply.h>
+#include <libwebem/webem_utils.h>
 #include "mime_types.h"
 #include "utf.h"
 #include <string>
 #include <fstream>
+#include <cstdint>
 #include <boost/algorithm/string.hpp>
 
 namespace http {
@@ -35,6 +37,9 @@ namespace status_strings {
 	constexpr auto forbidden = "HTTP/1.1 403 Forbidden\r\n";
 	constexpr auto not_found = "HTTP/1.1 404 Not Found\r\n";
 	constexpr auto method_not_allowed = "HTTP/1.1 405 Method Not Allowed\r\n";
+	constexpr auto payload_too_large = "HTTP/1.1 413 Payload Too Large\r\n";
+	constexpr auto uri_too_long = "HTTP/1.1 414 URI Too Long\r\n";
+	constexpr auto request_header_fields_too_large = "HTTP/1.1 431 Request Header Fields Too Large\r\n";
 	constexpr auto internal_server_error = "HTTP/1.1 500 Internal Server Error\r\n";
 	constexpr auto not_implemented = "HTTP/1.1 501 Not Implemented\r\n";
 	constexpr auto bad_gateway = "HTTP/1.1 502 Bad Gateway\r\n";
@@ -74,6 +79,12 @@ namespace status_strings {
 				return not_found;
 			case reply::method_not_allowed:
 				return method_not_allowed;
+			case reply::payload_too_large:
+				return payload_too_large;
+			case reply::uri_too_long:
+				return uri_too_long;
+			case reply::request_header_fields_too_large:
+				return request_header_fields_too_large;
 			case reply::internal_server_error:
 				return internal_server_error;
 			case reply::not_implemented:
@@ -95,6 +106,21 @@ namespace misc_strings {
 	constexpr char crlf[] = { '\r', '\n', 0 };
 
 } // namespace misc_strings
+
+namespace {
+
+	// set_content_from_file() buffers the whole file into rep->content in memory, so an
+	// upper bound is needed independent of what tellg() reports. 512 MiB comfortably
+	// covers any legitimate static asset or download libwebem is expected to serve
+	// in-memory, while still ruling out accidentally reading a multi-GB or unbounded
+	// (e.g. non-seekable) source into a single std::string.
+	// Kept at this (anonymous-namespace, module) scope rather than inside the
+	// function because it is a library-wide bound: every caller of
+	// set_content_from_file() is subject to the same limit, not a
+	// per-call-site parameter.
+	constexpr uintmax_t MAX_REPLY_FILE_SIZE = 512ULL * 1024 * 1024;
+
+} // namespace
 
 std::string reply::header_to_string()
 {
@@ -170,6 +196,18 @@ namespace stock_replies {
 				   "<head><title>Method Not Allowed</title></head>"
 				   "<body><h1>405 Method Not Allowed</h1></body>"
 				   "</html>";
+	constexpr auto payload_too_large = "<html>"
+				   "<head><title>Payload Too Large</title></head>"
+				   "<body><h1>413 Payload Too Large</h1></body>"
+				   "</html>";
+	constexpr auto uri_too_long = "<html>"
+				   "<head><title>URI Too Long</title></head>"
+				   "<body><h1>414 URI Too Long</h1></body>"
+				   "</html>";
+	constexpr auto request_header_fields_too_large = "<html>"
+				   "<head><title>Request Header Fields Too Large</title></head>"
+				   "<body><h1>431 Request Header Fields Too Large</h1></body>"
+				   "</html>";
 	constexpr auto internal_server_error = "<html>"
 					       "<head><title>Internal Server Error</title></head>"
 					       "<body><h1>500 Internal Server Error</h1></body>"
@@ -221,6 +259,12 @@ namespace stock_replies {
 				return not_found;
 			case reply::method_not_allowed:
 				return method_not_allowed;
+			case reply::payload_too_large:
+				return payload_too_large;
+			case reply::uri_too_long:
+				return uri_too_long;
+			case reply::request_header_fields_too_large:
+				return request_header_fields_too_large;
 			case reply::internal_server_error:
 				return internal_server_error;
 			case reply::not_implemented:
@@ -263,13 +307,50 @@ void reply::add_security_headers(reply *rep, bool is_tls)
 	//add_header(rep, "X-Frame-Options", "SAMEORIGIN", true);	// obsolete thx to CSP
 }
 
-void reply::add_cors_headers(reply *rep)
+void reply::add_cors_headers(reply *rep, const std::string &origin, const std::vector<std::string> &allowed_origins)
 {
-	add_header(rep, "Access-Control-Allow-Origin", "*", true);
+	// No Origin header, or nothing configured: send no CORS headers at all. That is
+	// the correct default for a control API -- see the header-file comment.
+	if (origin.empty())
+		return;
+	for (const auto &allowed : allowed_origins)
+	{
+		if (allowed == origin)
+		{
+			// Echo the exact origin, never "*": ACAO:* combined with an
+			// IP/trusted-network authenticated session would let any site the
+			// browser visits read the response.
+			add_header(rep, "Access-Control-Allow-Origin", origin, true);
+			add_header(rep, "Vary", "Origin", true);
+			return;
+		}
+	}
 }
 
 void reply::add_header(reply *rep, const std::string &name, const std::string &value, bool replace)
 {
+	// A CR/LF in either the name or the value would be emitted verbatim by
+	// header_to_string() and split the response, letting the caller inject
+	// arbitrary further headers or body content (HTTP response splitting). Every
+	// in-repo call site is built from static strings or values request_parser.cpp
+	// already stripped of control characters before they ever reach here; if this
+	// ever fires, the caller supplied a bad value and has a bug. Reject rather than
+	// strip -- silently mangling the header would hide exactly the bug that needs
+	// fixing. add_header returns void (a very widely called function, inside and
+	// outside this repo), and this is a static function with no logger of its own
+	// to report through, so drop the rejected header silently rather than write to
+	// stderr: an application bug that calls add_header in a loop with a bad value
+	// would otherwise flood a library-owned output stream the caller never asked
+	// for and may not even control (stderr may be redirected, closed, or shared
+	// with unrelated processes). Callers that can offer a better signal already
+	// do -- add_header_attachment and set_download_file perform this same check
+	// themselves and return false, which is the honest place for the caller to
+	// learn about and handle the rejection.
+	if (utils::contains_control_chars(name) || utils::contains_control_chars(value))
+	{
+		return;
+	}
+
 	size_t num = rep->headers.size();
 	if (replace) {
 		for (auto &h : rep->headers)
@@ -316,7 +397,18 @@ bool reply::set_content_from_file(reply *rep, const std::string &file_path)
 	if (!file.is_open())
 		return false;
 	file.seekg(0, std::ios::end);
-	size_t fileSize = (size_t)file.tellg();
+	std::streamoff len = file.tellg();
+	// tellg() returns -1 for a non-seekable source (FIFO, character device, some
+	// /proc entries); casting that to size_t would yield SIZE_MAX and make resize()
+	// below throw. Reject it outright instead of guessing a size.
+	if (len < 0)
+		return false;
+	// Compare in uintmax_t rather than size_t: defensive against a platform
+	// where std::streamoff is wider than size_t, so the cast to size_t below
+	// (once this check has passed) cannot itself have already truncated len.
+	if (static_cast<uintmax_t>(len) > MAX_REPLY_FILE_SIZE)
+		return false;
+	size_t fileSize = static_cast<size_t>(len);
 	if (fileSize > 0) {
 		rep->content.resize(fileSize);
 		file.seekg(0, std::ios::beg);
@@ -330,7 +422,8 @@ bool reply::set_content_from_file(reply *rep, const std::string &file_path, cons
 {
 	if (!reply::set_content_from_file(rep, file_path))
 		return false;
-	reply::add_header_attachment(rep, attachment);
+	if (!reply::add_header_attachment(rep, attachment))
+		return false;
 	if (set_content_type == true) {
 		std::size_t last_dot_pos = attachment.find_last_of('.');
 		if (last_dot_pos != std::string::npos) {
@@ -346,15 +439,27 @@ bool reply::set_download_file(reply* rep, const std::string& file_path, const st
 {
 	if (file_path.empty() || attachment.empty())
 		return false;
+	// file_path and attachment are joined with "\r\n" as an internal delimiter, then
+	// split apart again by connection.cpp's send_file dispatch, which takes
+	// everything after the first CRLF as the attachment name. A CR/LF embedded in
+	// either value would let the caller smuggle a second delimiter (or, once past
+	// add_header_attachment downstream, split the Content-Disposition header
+	// itself). Reject here, at the point the application supplies the value,
+	// rather than deep in the write path.
+	if (utils::contains_control_chars(file_path) || utils::contains_control_chars(attachment))
+		return false;
 	rep->reset();
 	rep->status = reply::status_type::download_file;
 	rep->content = file_path + "\r\n" + attachment;
 	return true;
 }
 
-void reply::add_header_attachment(reply *rep, const std::string &attachment)
+bool reply::add_header_attachment(reply *rep, const std::string &attachment)
 {
+	if (utils::contains_control_chars(attachment))
+		return false;
 	reply::add_header(rep, "Content-Disposition", "attachment; filename=" + attachment);
+	return true;
 }
 
 /*

@@ -470,6 +470,16 @@ bool fastcgi_parser::handlePHP(const server_settings &settings, const std::strin
 	// These are environment values only and cannot be interpreted as commands.
 	for (const auto &header : req.headers)
 	{
+		// Skip "Proxy" (case-insensitively): mapped straight through, it becomes
+		// HTTP_PROXY in the child's environment, and libcurl/PHP streams/most
+		// HTTP clients treat that variable as "use this as my outbound proxy"
+		// (the httpoxy class of bugs, CVE-2016-5385). An unauthenticated client
+		// could then redirect every outbound request the PHP script makes
+		// through a server of its choosing. Apache, nginx and PHP itself all
+		// added the same exclusion in 2016; there is no legitimate use of this
+		// request header that requires it to reach the CGI environment.
+		if (request::mg_strcasecmp(header.name.c_str(), "Proxy") == 0)
+			continue;
 		std::string rName = "HTTP_" + header.name;
 		http::server::utils::str_replace(rName, "-", "_");
 		http::server::utils::str_upper(rName);

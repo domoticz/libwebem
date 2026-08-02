@@ -30,6 +30,126 @@
 namespace http {
 	namespace server {
 
+		/// Returns the request's Origin header, or an empty string if absent.
+		/// Used to decide whether/what to echo back via reply::add_cors_headers --
+		/// never trust this value for anything beyond an exact-match comparison
+		/// against a configured allow-list.
+		static std::string GetRequestOrigin(const request &req)
+		{
+			const char *h = request::get_req_header(&req, "Origin");
+			return h ? std::string(h) : std::string();
+		}
+
+		/// Strips a trailing ":80" (isSecure false) or ":443" (isSecure true) from
+		/// a Host-header-shaped "host[:port]" string, leaving anything else
+		/// untouched. Browsers never include the scheme's default port in the
+		/// Origin header they send (https://fetch.spec.whatwg.org/#concept-origin
+		/// serialises it as scheme "://" host, with the port omitted when it is
+		/// the scheme's default), but a Host header that explicitly repeats the
+		/// default port -- "Host: example.com:80" over plain HTTP, say -- is
+		/// still perfectly legal, so the two need normalising onto the same
+		/// footing before OriginMatchesRequestHost can compare them.
+		static std::string StripDefaultPort(const std::string &host, bool isSecure)
+		{
+			const std::string defaultPort = isSecure ? "443" : "80";
+			// IPv6 literal ("[::1]:80"): the port, if present, follows the closing
+			// bracket, so search for the separating ':' from there rather than with
+			// rfind, which would otherwise catch one of the address's own colons.
+			if (!host.empty() && host.front() == '[')
+			{
+				std::size_t closeBracket = host.find(']');
+				if (closeBracket == std::string::npos)
+					return host; // malformed; leave as-is and let the comparison fail
+				std::size_t colonPos = host.find(':', closeBracket);
+				if (colonPos != std::string::npos && host.substr(colonPos + 1) == defaultPort)
+					return host.substr(0, colonPos);
+				return host;
+			}
+			std::size_t colonPos = host.rfind(':');
+			if (colonPos != std::string::npos && host.substr(colonPos + 1) == defaultPort)
+				return host.substr(0, colonPos);
+			return host;
+		}
+
+		/// Extracts just the host (no scheme, no port, brackets stripped from an
+		/// IPv6 literal) from an Origin header value, given the expected
+		/// "scheme://" prefix. Returns empty if origin does not start with that
+		/// exact scheme -- callers must treat that as "does not match", not as
+		/// "host is empty", since an empty allowed_hosts entry is never expected
+		/// to occur and must not accidentally compare equal to it.
+		static std::string ExtractOriginHost(const std::string &origin, const std::string &scheme)
+		{
+			if (origin.rfind(scheme, 0) != 0)
+				return std::string();
+			std::string hostPort = origin.substr(scheme.size());
+			// Same bracket-aware split as StripDefaultPort above (Origin's IPv6
+			// literals are bracketed exactly like a Host header's).
+			if (!hostPort.empty() && hostPort.front() == '[')
+			{
+				std::size_t closeBracket = hostPort.find(']');
+				return closeBracket == std::string::npos ? hostPort : hostPort.substr(1, closeBracket - 1);
+			}
+			std::size_t colonPos = hostPort.rfind(':');
+			return colonPos == std::string::npos ? hostPort : hostPort.substr(0, colonPos);
+		}
+
+		/// True if `origin` is an acceptable same-origin match for this request,
+		/// i.e. the WebSocket handshake did not cross an origin boundary this
+		/// server cares about. isSecure selects the scheme, since neither Origin
+		/// nor Host carries scheme information on its own (well, Origin does,
+		/// but it must agree with how this listener is configured).
+		///
+		/// When settings.allowed_hosts is configured, origin's host is checked
+		/// against THAT allow-list rather than against this request's own Host
+		/// header. This is the DNS-rebinding fix: comparing Origin to Host tells
+		/// you the two AGREE, not that either one is legitimate, and a browser
+		/// always derives both from the same URL -- so for a request originated
+		/// by a page the browser resolved via a hostname the attacker controls
+		/// (a short-TTL DNS record re-pointed at this server's LAN address after
+		/// the victim's browser cached the page from it), Origin and Host agree
+		/// trivially, on the attacker's own chosen hostname. Comparing against a
+		/// fixed, operator-configured list instead requires that hostname to
+		/// ALSO be one this server was explicitly told to answer to -- which an
+		/// attacker's rebinding domain never is. See server_settings::allowed_hosts.
+		///
+		/// When allowed_hosts is empty (the default), falls back to the original
+		/// behaviour -- Origin compared against this request's own Host header --
+		/// so deployments that have not set it are unaffected. See
+		/// docs/INTEGRATION.md for why leaving it unset leaves rebinding open.
+		static bool OriginMatchesRequestHost(const request &req, const std::string &origin, bool isSecure, const server_settings &settings)
+		{
+			if (origin.empty())
+				return false;
+			std::string scheme = isSecure ? "https://" : "http://";
+
+			if (!settings.allowed_hosts.empty())
+			{
+				std::string originHost = ExtractOriginHost(origin, scheme);
+				if (originHost.empty())
+					return false; // wrong scheme, or origin had no host at all
+				for (const auto &allowed : settings.allowed_hosts)
+				{
+					if (boost::iequals(originHost, allowed))
+						return true;
+				}
+				return false;
+			}
+
+			// Fallback: no allow-list configured. Preserves the pre-fix comparison
+			// exactly (including its case-sensitivity, see below) so existing
+			// deployments see no behaviour change until they opt in.
+			const char *hostHeader = request::get_req_header(&req, "Host");
+			if (!hostHeader)
+				return false;
+			std::string expected = scheme;
+			expected += StripDefaultPort(hostHeader, isSecure);
+			// Deliberately case-sensitive: browsers lower-case both the scheme and
+			// the host when they serialise Origin (RFC 6454), so a real same-origin
+			// request always arrives already normalised to match hostHeader's case
+			// as sent by that same browser in its own request line.
+			return origin == expected;
+		}
+
 		/**
 		Webem constructor
 
@@ -813,7 +933,7 @@ namespace http {
 				{
 					reply::add_header(&rep, "Cache-Control", "no-cache");
 					reply::add_header(&rep, "Pragma", "no-cache");
-					reply::add_cors_headers(&rep);
+					reply::add_cors_headers(&rep, GetRequestOrigin(req), m_settings.allowed_cors_origins);
 				}
 				else
 				{
@@ -939,6 +1059,23 @@ namespace http {
 				m_userpasswords.end());
 		}
 
+		bool cWebem::HasConfiguredUsers() const
+		{
+			std::lock_guard<std::mutex> cfglock(m_configMutex);
+			// URIGHTS_CLIENTID entries are not people and must not count. An
+			// integrator registers OAuth2 applications and access tokens through
+			// the same AddUserPassword() path as real accounts -- Domoticz seeds
+			// an application for its IAM server, so m_userpasswords is non-empty
+			// on a brand new installation with no human user at all. Counting
+			// those would answer "is anything registered" when the question is
+			// "is a login required to use this server", and would leave the
+			// WebSocket demanding credentials that no one can possibly hold.
+			return std::any_of(m_userpasswords.cbegin(), m_userpasswords.cend(),
+					   [](const _tWebUserPassword &u) {
+						   return u.userrights != URIGHTS_CLIENTID;
+					   });
+		}
+
 		void cWebem::ClearUserPasswords()
 		{
 			{
@@ -961,7 +1098,7 @@ namespace http {
 			0b11111110, //
 		};
 
-		void cWebem::AddTrustedNetworks(std::string network)
+		void cWebem::AddTrustedNetworks(const std::string &network)
 		{
 			if (network.empty())
 			{
@@ -1090,11 +1227,13 @@ namespace http {
 				}
 			}
 
+			std::lock_guard<std::mutex> lock(m_configMutex);
 			m_localnetworks.push_back(ipnetwork);
 		}
 
 		void cWebem::ClearTrustedNetworks()
 		{
+			std::lock_guard<std::mutex> lock(m_configMutex);
 			m_localnetworks.clear();
 		}
 
@@ -1128,14 +1267,15 @@ namespace http {
 			return m_webRoot;
 		}
 
-		WebEmSession * cWebem::GetSession(const std::string & ssid)
+		bool cWebem::GetSession(const std::string & ssid, WebEmSession & out)
 		{
 			std::unique_lock<std::mutex> lock(m_sessionsMutex);
 			auto itt = m_sessions.find(ssid);
-			if (itt != m_sessions.end())
-				return &itt->second;
+			if (itt == m_sessions.end())
+				return false;
 
-			return nullptr;
+			out = itt->second;
+			return true;
 		}
 
 		void cWebem::AddSession(const WebEmSession & session)
@@ -1157,31 +1297,58 @@ namespace http {
 				m_sessions.erase(itt);
 		}
 
+		bool cWebem::TouchSessionExpiry(const std::string &ssid, WebEmSession &out)
+		{
+			if (ssid.empty())
+				return false;
+
+			std::unique_lock<std::mutex> lock(m_sessionsMutex);
+			auto it = m_sessions.find(ssid);
+			if (it == m_sessions.end())
+				return false;
+
+			time_t now = utils::webem_time();
+			bool renewed = false;
+			// Short-session half-life: within SHORT_SESSION_TIMEOUT/2 (5 minutes)
+			// of the current expiry, renew with a fresh SHORT_SESSION_TIMEOUT (10
+			// minutes). This is what keeps a session alive under regular activity
+			// -- any request in the last 5 minutes of the window pushes expiry
+			// another 10 minutes out. It also catches a "remember me" (long)
+			// session nearing its absolute 30-day expiry, which deliberately
+			// drops it to a plain 10-minute session rather than extending
+			// remember-me forever.
+			if (it->second.expires - (SHORT_SESSION_TIMEOUT / 2) < now)
+			{
+				it->second.expires = now + SHORT_SESSION_TIMEOUT;
+				renewed = true;
+			}
+			// Long-session half-life: only reached when the branch above did not
+			// fire, i.e. expiry is not imminent. The first half of the condition
+			// (expires > SHORT_SESSION_TIMEOUT + now) leaves anything close
+			// enough to expiry to the short-session branch instead of double-
+			// handling it here; the second half fires once a "remember me"
+			// session is more than halfway through its 30-day lifetime, renewing
+			// it for another full 30 days so continued activity keeps
+			// remember-me alive instead of letting it decay into a short session.
+			else if ((it->second.expires > SHORT_SESSION_TIMEOUT + now) && (it->second.expires - (LONG_SESSION_TIMEOUT / 2) < now))
+			{
+				it->second.expires = now + LONG_SESSION_TIMEOUT;
+				renewed = true;
+			}
+			out = it->second;
+			return renewed;
+		}
+
 		void cWebem::RenewSessionIfNeeded(const std::string &sessionId)
 		{
-			if (sessionId.empty())
+			WebEmSession touched;
+			if (!TouchSessionExpiry(sessionId, touched))
 				return;
-			time_t newExpires = 0;
-			{
-				std::unique_lock<std::mutex> lock(m_sessionsMutex);
-				auto it = m_sessions.find(sessionId);
-				if (it == m_sessions.end())
-					return;
-				time_t now = utils::webem_time();
-				if (it->second.expires - (SHORT_SESSION_TIMEOUT / 2) < now)
-				{
-					newExpires = now + SHORT_SESSION_TIMEOUT;
-					it->second.expires = newExpires;
-				}
-				else if ((it->second.expires > SHORT_SESSION_TIMEOUT + now) && (it->second.expires - (LONG_SESSION_TIMEOUT / 2) < now))
-				{
-					newExpires = now + LONG_SESSION_TIMEOUT;
-					it->second.expires = newExpires;
-				}
-			}
-			if (newExpires != 0 && mySessionStore != nullptr)
+
+			if (mySessionStore != nullptr)
 			{
 				auto store = mySessionStore;
+				time_t newExpires = touched.expires;
 				boost::asio::post(m_io_context, [store, sessionId, newExpires]() {
 					store->RenewSessionExpiration(sessionId, newExpires);
 				});
@@ -1222,9 +1389,117 @@ namespace http {
 			{
 				mySessionStore->CleanSessions();
 			}
+			PruneRemoteClients();
 			// Schedule next cleanup
 			m_session_clean_timer.expires_after(std::chrono::minutes(15));
 			m_session_clean_timer.async_wait([this](auto &&) { CleanSessions(); });
+		}
+
+		// Backstop cap on m_remote_web_clients, independent of the staleness
+		// pruning in PruneRemoteClients(): a trusted proxy forwarding an
+		// attacker-controlled address per request (see findRealHostBehindProxies)
+		// could otherwise grow the map by one entry per request. Enforced both
+		// from the periodic sweep and inline from TrackRemoteClient(), so the
+		// bound holds at all times rather than only right after a sweep.
+		static constexpr size_t MAX_REMOTE_WEB_CLIENTS = 50000;
+
+		void cWebem::EvictOldestRemoteClientLocked()
+		{
+			if (m_remote_clients_by_last_seen.empty())
+				return;
+			// begin() is the oldest entry precisely because the index is kept
+			// ordered by last_seen (see the member declaration in cWebem.h).
+			auto oldest = m_remote_clients_by_last_seen.begin();
+			m_remote_web_clients.erase(oldest->second);
+			m_remote_clients_by_last_seen.erase(oldest);
+		}
+
+		void cWebem::PruneRemoteClients()
+		{
+			std::lock_guard<std::mutex> lock(m_remoteClientsMutex);
+
+			time_t cutoff = utils::webem_time() - SHORT_SESSION_TIMEOUT;
+			for (auto it = m_remote_web_clients.begin(); it != m_remote_web_clients.end(); )
+			{
+				if (it->second.info.last_seen < cutoff)
+				{
+					m_remote_clients_by_last_seen.erase(it->second.lru_it);
+					it = m_remote_web_clients.erase(it);
+				}
+				else
+					++it;
+			}
+
+			// Staleness pruning alone doesn't bound growth within a single sweep
+			// interval, so drop the oldest entries by last_seen down to the cap if
+			// it is still exceeded. Using the last-seen index rather than
+			// m_remote_web_clients.begin() matters: that map is keyed by
+			// address+port, so its begin() is lexicographically first, not oldest,
+			// and evicting by key order would let an attacker feeding descending
+			// addresses evict the most recently-seen legitimate entries first.
+			while (m_remote_web_clients.size() > MAX_REMOTE_WEB_CLIENTS)
+				EvictOldestRemoteClientLocked();
+		}
+
+		bool cWebem::TrackRemoteClient(const std::string &remoteHost, const std::string &localPort, const std::string &requestUri)
+		{
+			std::string key = remoteHost + localPort;
+			time_t now = utils::webem_time();
+
+			std::lock_guard<std::mutex> lock(m_remoteClientsMutex);
+			bool bSeenBefore = true;
+			auto itt_rc = m_remote_web_clients.find(key);
+			if (itt_rc == m_remote_web_clients.end())
+			{
+				// Enforce the cap here too, not just from the periodic
+				// CleanSessions() sweep: behind a trusted proxy an attacker can
+				// supply a distinct forged address on every request, and up to 15
+				// minutes between sweeps is enough time to blow through the cap
+				// and keep growing unbounded for the rest of the interval. Evicting
+				// via the last-seen index (see EvictOldestRemoteClientLocked) keeps
+				// this O(log n) rather than an O(n) scan of a map that can hold
+				// MAX_REMOTE_WEB_CLIENTS entries, so paying this cost on every
+				// request that introduces a new address stays cheap even at the cap.
+				if (m_remote_web_clients.size() >= MAX_REMOTE_WEB_CLIENTS)
+					EvictOldestRemoteClientLocked();
+
+				connection::_tRemoteClients rc;
+				rc.host_remote_endpoint_address_ = remoteHost;
+				rc.host_local_endpoint_port_ = localPort;
+				_tRemoteClientRecord rec{ rc, m_remote_clients_by_last_seen.end() };
+				itt_rc = m_remote_web_clients.emplace(key, std::move(rec)).first;
+				bSeenBefore = false;
+			}
+			else if (itt_rc->second.info.last_seen < (now - SHORT_SESSION_TIMEOUT))
+				bSeenBefore = false;
+
+			// Keep the last-seen index in sync on every touch, not just on first
+			// sight: an existing entry's position has to move forward too, or the
+			// index would go on reporting it as a stale eviction candidate even
+			// though it was just seen again.
+			if (itt_rc->second.lru_it != m_remote_clients_by_last_seen.end())
+				m_remote_clients_by_last_seen.erase(itt_rc->second.lru_it);
+			itt_rc->second.lru_it = m_remote_clients_by_last_seen.emplace(now, key);
+
+			itt_rc->second.info.last_seen = now;
+			itt_rc->second.info.host_last_request_uri_ = requestUri;
+			return bSeenBefore;
+		}
+
+		size_t cWebem::CountRemoteClients()
+		{
+			std::lock_guard<std::mutex> lock(m_remoteClientsMutex);
+			return m_remote_web_clients.size();
+		}
+
+		std::vector<connection::_tRemoteClients> cWebem::GetRemoteClients()
+		{
+			std::lock_guard<std::mutex> lock(m_remoteClientsMutex);
+			std::vector<connection::_tRemoteClients> ret;
+			ret.reserve(m_remote_web_clients.size());
+			for (const auto &entry : m_remote_web_clients)
+				ret.push_back(entry.second.info);
+			return ret;
 		}
 
 		bool cWebem::isValidIP(std::string &ip)
@@ -1282,9 +1557,9 @@ namespace http {
 			return false;
 		}
 
-		bool cWebem::findRealHostBehindProxies(const request &req, std::string &realhost)
+		bool cWebem::findRealHostBehindProxies(const request &req, std::string &realhost, bool &bHaveProxyHeaders)
 		{
-			// Checking for 3 possible headers (in order of handling)
+			// Checking for 3 possible headers:
 			// "Forwarded"	RFC7239  (https://www.rfc-editor.org/rfc/rfc7239)
 			// "X-Forwarded-For" The defacto standard header used by many web/proxy servers (https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Forwarded-For)
 			// "X-Real-IP"	The (old) default header used by NGINX  (http://nginx.org/en/docs/http/ngx_http_realip_module.html#real_ip_header)
@@ -1292,39 +1567,97 @@ namespace http {
 			// These headers can occur multiple times, so need to be 'squashed' together
 			// And a single line can contain multiple (comma separated) values in order
 
-			std::vector<std::string> headers;
-			std::vector<std::string> hosts;
+			bHaveProxyHeaders = false;
+			realhost.clear();
 
-			if (sumProxyHeader("forwarded", req, headers))
-			{
-				// We found one or more Forwarded headers that need to be processed into a list of Hosts
-				if (!parseForwardedProxyHeader(headers, hosts))
-				{
-					return false;
-				}
-			}
-			else if (sumProxyHeader("x-forwarded-for", req, headers))
-			{
-				// We found one or more X-Forwarded-For headers that need to be processed into a list of Hosts
-				if (!parseProxyHeader(headers, hosts))
-				{
-					return false;
-				}
-			}
-			else if (sumProxyHeader("x-real-ip", req, headers))
-			{
-				// We found one or more X-Real-IP headers that need to be processed into a list of Hosts
-				if (!parseProxyHeader(headers, hosts))
-				{
-					return false;
-				}
-			}
-			else
+			// Proxy headers are ignored entirely unless a deployment has explicitly
+			// named which single family its reverse proxy writes (m_settings.trusted_proxy_header_family).
+			// These three headers are three independent, unauthenticated header
+			// families; a real proxy populates only ONE of them, so the others
+			// arrive as unmodified client data. Consulting whichever one happens to
+			// be present lets the client itself choose which chain the server
+			// believes -- see docs/INTEGRATION.md for the concrete bypass this
+			// closes. With no family configured there is nothing safe to trust here,
+			// so the peer address is used as-is.
+			if (m_settings.trusted_proxy_header_family == ProxyHeaderFamily::None)
 			{
 				return true;
 			}
 
-			realhost = hosts[0];	// Even if we found a chain of hosts, we always use the first (= origin)
+			// Collect each family's raw header lines up front -- purely to detect
+			// whether more than one family is present on this request. Only the
+			// configured family's lines are ever parsed into candidate hosts below;
+			// the others are never consulted for their content.
+			std::vector<std::string> forwardedLines;
+			std::vector<std::string> xForwardedForLines;
+			std::vector<std::string> xRealIpLines;
+			bool haveForwarded = sumProxyHeader("forwarded", req, forwardedLines);
+			bool haveXForwardedFor = sumProxyHeader("x-forwarded-for", req, xForwardedForLines);
+			bool haveXRealIp = sumProxyHeader("x-real-ip", req, xRealIpLines);
+
+			int familiesPresent = (haveForwarded ? 1 : 0) + (haveXForwardedFor ? 1 : 0) + (haveXRealIp ? 1 : 0);
+			if (familiesPresent > 1)
+			{
+				// A request carrying more than one proxy-header family has no safe
+				// interpretation: each family is an independent, attacker-reachable
+				// chain, and they can disagree about who the client is. This is the
+				// same reasoning applied to a request carrying two disagreeing
+				// Content-Length headers -- reject outright rather than guessing
+				// which chain to believe.
+				if (m_logger)
+					m_logger->Log(LogLevel::Status,
+						      "[web:%s] Request carries more than one proxy-forwarding header family; rejecting as ambiguous",
+						      GetPort().c_str());
+				return false;
+			}
+
+			std::vector<std::string> hosts;
+
+			switch (m_settings.trusted_proxy_header_family)
+			{
+			case ProxyHeaderFamily::Forwarded:
+				if (!haveForwarded)
+					return true;	// configured family not present on this request -- no proxy header
+				bHaveProxyHeaders = true;
+				parseForwardedProxyHeader(forwardedLines, hosts);
+				break;
+			case ProxyHeaderFamily::XForwardedFor:
+				if (!haveXForwardedFor)
+					return true;
+				bHaveProxyHeaders = true;
+				parseProxyHeader(xForwardedForLines, hosts);
+				break;
+			case ProxyHeaderFamily::XRealIP:
+				if (!haveXRealIp)
+					return true;
+				bHaveProxyHeaders = true;
+				parseProxyHeader(xRealIpLines, hosts);
+				break;
+			default:
+				return true;
+			}
+
+			if (hosts.empty())
+			{
+				// Proxy headers were present but nothing usable survived parsing and
+				// filtering (e.g. a proxy that passes the client's header through instead
+				// of appending to it, so the only entry was a forged loopback address).
+				// Leave realhost empty; the caller must NOT fall back to inheriting the
+				// peer's trust, or the forgery succeeds anyway.
+				if (m_logger)
+					m_logger->Log(LogLevel::Status,
+						      "[web:%s] Proxy header present but no usable client address survived filtering; treating origin as untrusted",
+						      GetPort().c_str());
+				return true;
+			}
+
+			// Use the LAST entry, not the first. A proxy appends the address of whoever
+			// connected to it, so the rightmost entry is the one our directly-connected
+			// proxy wrote and is the only value in the chain we have any reason to
+			// believe. Everything to its left is supplied by the client and is forgeable:
+			// taking hosts[0] let a remote attacker send "X-Forwarded-For: 127.0.0.1" and
+			// be granted trusted-network administrative access.
+			realhost = hosts.back();
 			return true;
 		}
 
@@ -1335,7 +1668,9 @@ namespace http {
 			{
 				sHeaderName = header.name;
 				std::transform(sHeaderName.begin(), sHeaderName.end(), sHeaderName.begin(), ::tolower);
-				if (sHeaderName.find(sHeader)==0)
+				// Exact match. This was a prefix test, which also collected unrelated
+				// headers such as "X-Forwarded-For-Internal" as if they were ours.
+				if (sHeaderName == sHeader)
 				{
 					vHeaderLines.push_back(header.value);
 				}
@@ -1344,7 +1679,51 @@ namespace http {
 			return !vHeaderLines.empty();		// Assuming the function is called with an empty vHeaderLines to begin with
 		}
 
-		bool cWebem::parseProxyHeader(const std::vector<std::string> &vHeaderLines, std::vector<std::string> &vHosts)
+		// An address that can never legitimately identify a *forwarded* client.
+		//
+		// A loopback or link-local address arriving as a forwarded hop is either a
+		// misconfigured proxy (one that passes the client's header through instead of
+		// appending to it) or an outright forgery. Believing it is what lets a remote
+		// attacker claim to be 127.0.0.1 and inherit trusted-network rights.
+		//
+		// The caller has already run the value through isValidIP(), which normalises it
+		// via inet_pton()/inet_ntop(), so exact prefix tests are reliable here.
+		static bool IsNonRoutableForwardedAddress(const std::string &ip_in)
+		{
+			if (ip_in.empty())
+				return true;
+
+			// inet_ntop emits lowercase hex today, but normalise once rather than
+			// scattering case-insensitive comparisons: a formatter or platform that
+			// ever emitted uppercase must not be able to slip an address past this.
+			std::string ip = ip_in;
+			std::transform(ip.begin(), ip.end(), ip.begin(),
+				       [](unsigned char c) { return static_cast<char>(::tolower(c)); });
+
+			if (ip == "::1" || ip == "::" || ip == "0.0.0.0")
+				return true;
+			// std::string::compare(pos, n, lit) is well defined when the string is
+			// shorter than n: it compares the available characters and reports a
+			// mismatch, so no length pre-check is needed here.
+			if (ip.compare(0, 4, "127.") == 0)			// 127.0.0.0/8, not just 127.0.0.1
+				return true;
+			if (ip.compare(0, 11, "::ffff:127.") == 0)		// IPv4-mapped loopback
+				return true;
+			if (ip.compare(0, 8, "169.254.") == 0)			// IPv4 link-local
+				return true;
+			if (ip.compare(0, 15, "::ffff:169.254.") == 0)
+				return true;
+			// IPv6 link-local fe80::/10 -> fe80: .. febf:
+			if (ip.size() >= 3 && ip[0] == 'f' && ip[1] == 'e')
+			{
+				const char c = ip[2];
+				if (c == '8' || c == '9' || c == 'a' || c == 'b')
+					return true;
+			}
+			return false;
+		}
+
+		void cWebem::parseProxyHeader(const std::vector<std::string> &vHeaderLines, std::vector<std::string> &vHosts)
 		{
 			for (const auto sLine : vHeaderLines)
 			{
@@ -1353,24 +1732,26 @@ namespace http {
 				for (std::string sPart : vLineParts)
 				{
 					if (isValidIP(sPart))
-						vHosts.push_back(sPart);
+					{
+						if (!IsNonRoutableForwardedAddress(sPart))
+							vHosts.push_back(sPart);
+					}
 					else {
 						size_t dpos = sPart.find_last_of(':');
 						if (dpos != std::string::npos)
 						{
 							//Strip off the port number
 							sPart = sPart.substr(0, dpos);
-							if (isValidIP(sPart))
+							if (isValidIP(sPart) && !IsNonRoutableForwardedAddress(sPart))
 								vHosts.push_back(sPart);
 						}
 					}
 				}
 			}
 
-			return !vHosts.empty();		// Assuming the function is called with an empty vHosts to begin with
 		}
 
-		bool cWebem::parseForwardedProxyHeader(const std::vector<std::string> &vHeaderLines, std::vector<std::string> &vHosts)
+		void cWebem::parseForwardedProxyHeader(const std::vector<std::string> &vHeaderLines, std::vector<std::string> &vHosts)
 		{
 			for (const auto sLine : vHeaderLines)
 			{
@@ -1379,33 +1760,49 @@ namespace http {
 				for (std::string sPart : vLineParts)
 				{
 					utils::trim_whitespace_inplace(sPart);
-					if (std::size_t isPos = sPart.find("for=") != std::string::npos)
+					// NOTE: this was previously
+					//     if (std::size_t isPos = sPart.find("for=") != std::string::npos)
+					// where != binds tighter than =, so isPos received the bool 0/1 rather
+					// than the match offset. It only ever worked when "for=" sat at offset 0.
+					std::size_t isPos = sPart.find("for=");
+					if (isPos != std::string::npos)
 					{
-						isPos = isPos + 3;
-						std::size_t iePos = sLine.length();
-						if (sPart.find(";", isPos) != std::string::npos)
-						{
-							iePos = sPart.find(";", isPos);
-						}
+						isPos += 4;			// skip "for="
+						std::size_t iePos = sPart.length();
+						std::size_t semi = sPart.find(';', isPos);
+						if (semi != std::string::npos)
+							iePos = semi;
 						std::string sSub = sPart.substr(isPos, (iePos - isPos));
-						if(isValidIP(sSub))
+						utils::trim_whitespace_inplace(sSub);
+						// RFC 7239 allows the value to be quoted, and IPv6 to be bracketed
+						// with an optional port: for="[2001:db8::1]:443"
+						if (sSub.size() >= 2 && sSub.front() == '"' && sSub.back() == '"')
+							sSub = sSub.substr(1, sSub.size() - 2);
+						if (!sSub.empty() && sSub.front() == '[')
+						{
+							std::size_t rb = sSub.find(']');
+							if (rb != std::string::npos)
+								sSub = sSub.substr(1, rb - 1);
+						}
+						else
+						{
+							// Strip an IPv4 port suffix, but never split a bare IPv6 literal.
+							std::size_t colon = sSub.find(':');
+							if (colon != std::string::npos && sSub.find(':', colon + 1) == std::string::npos)
+								sSub = sSub.substr(0, colon);
+						}
+						if (isValidIP(sSub) && !IsNonRoutableForwardedAddress(sSub))
 							vHosts.push_back(sSub);
 					}
 				}
 			}
 
-			return !vHosts.empty();		// Assuming the function is called with an empty vHosts to begin with
 		}
 
 		bool cWebem::CheckVHost(const request &req)
 		{
-			if (m_settings.vhostname.empty() || !m_settings.is_secure())	// Only do vhost checking for Secure (https) server
-				return true;
-
+			// Host header, name only (port stripped) -- shared by both checks below.
 			std::string sHost;
-			std::string vHost = m_settings.vhostname;
-
-			// When a vhostname is given, only respond to request addressed to it
 			const char *cHost = req.get_req_header(&req, "Host");
 			if (cHost != nullptr)
 			{
@@ -1416,7 +1813,47 @@ namespace http {
 				else
 					sHost = scHost;
 			}
-			else
+
+			// m_settings.allowed_hosts, when configured, validates Host on EVERY
+			// request -- HTTP or HTTPS, vhostname or not -- unlike the legacy
+			// vhostname check below, which only ever ran for a TLS listener. This
+			// is the fix for DNS rebinding against the WebSocket trusted-network
+			// same-origin check (see OriginMatchesRequestHost): that check only
+			// means anything once Host itself can be trusted, and on a plain-HTTP
+			// listener with no vhostname set, nothing previously validated Host at
+			// all. See server_settings::allowed_hosts for the full attack and why
+			// this defaults to empty (preserving old behaviour) rather than being
+			// enforced unconditionally.
+			if (!m_settings.allowed_hosts.empty())
+			{
+				if (cHost == nullptr)
+				{
+					if (m_logger) m_logger->Debug(DebugCategory::WebServer, "[web:%s] Rejected request: allowed_hosts is configured but Host header is missing", GetPort().c_str());
+					return false;
+				}
+				bool bHostAllowed = false;
+				for (const auto &allowed : m_settings.allowed_hosts)
+				{
+					if (boost::iequals(sHost, allowed))
+					{
+						bHostAllowed = true;
+						break;
+					}
+				}
+				if (!bHostAllowed)
+				{
+					if (m_logger) m_logger->Log(LogLevel::Status, "[web:%s] Rejected request: Host '%s' is not in the configured allowed_hosts list", GetPort().c_str(), sHost.c_str());
+					return false;
+				}
+			}
+
+			if (m_settings.vhostname.empty() || !m_settings.is_secure())	// Only do vhost checking for Secure (https) server
+				return true;
+
+			std::string vHost = m_settings.vhostname;
+
+			// When a vhostname is given, only respond to request addressed to it
+			if (cHost == nullptr)
 			{
 				if (m_logger) m_logger->Debug(DebugCategory::WebServer, "[web:%s] Unable to verify vhostname as Host header is missing in request!", GetPort().c_str());
 				return false;
@@ -1434,7 +1871,7 @@ namespace http {
 			if (user.empty())
 			{
 				rep = reply::stock_reply(reply::unauthorized, true, m_settings.is_secure());
-				reply::add_cors_headers(&rep);
+				reply::add_cors_headers(&rep, GetRequestOrigin(req), m_settings.allowed_cors_origins);
 				std::string szAuthHeader = "Basic realm=\"" + m_DigistRealm + "\"";
 				reply::add_header(&rep, "WWW-Authenticate", szAuthHeader);
 			}
@@ -1557,170 +1994,257 @@ namespace http {
 					if(tokentype.find("JWT") != std::string::npos)
 					{
 						// We found the text JWT, now let's really check if it as a valid JWT Token
-						// Step 1: Check if the JWT has an algorithm in the header AND an issuer (iss) claim in the payload
-						auto decodedJWT = jwt::decode(sToken, &base64url_decode);
-						if(!decodedJWT.has_algorithm())
+						//
+						// jwt::decode() and the claim accessors below throw on anything they
+						// don't like: wrong segment count, invalid base64url, invalid JSON,
+						// missing claims read via .get_*() before checking .has_*(), etc. This
+						// branch is reached before any authentication has succeeded, so an
+						// unauthenticated caller fully controls sToken -- letting any of that
+						// escape would unwind out of the async completion handler and take the
+						// whole server thread down on a single malformed request.
+						try
 						{
-							if (m_logger) m_logger->Debug(DebugCategory::Auth,"[JWT] Token does not contain an algorithm!");
-							return 0;
-						}
-						if(!(decodedJWT.has_audience() && decodedJWT.has_issuer()))
-						{
-							if (m_logger) m_logger->Debug(DebugCategory::Auth,"[JWT] Token does not contain an intended audience and/or issuer!");
-							return 0;
-						}
-						// Step 2: Find the audience = our ClientID (the username associated with the ClientID user right)
-						std::string clientid = decodedJWT.get_audience().cbegin()->data();	// Assumption: only 1 element in the AUD set!
-						std::string JWTsubject = decodedJWT.get_subject();
-						if (m_logger) m_logger->Debug(DebugCategory::Auth,"[JWT] Token audience : %s", clientid.c_str());
-
-						std::string signingsecret;
-						std::string client_password;
-						time_t accept_legacy_until = 0;
-						std::string clientpubkey;
-						std::string client_key_id;
-						bool clientispublic = false;
-						// Check if the audience has been registered as a User (type CLIENTID)
-						for (const auto &my : userpasswords)
-						{
-							if (my.Username == clientid)
+							// Step 1: Check if the JWT has an algorithm in the header AND an issuer (iss) claim in the payload
+							auto decodedJWT = jwt::decode(sToken, &base64url_decode);
+							if(!decodedJWT.has_algorithm())
 							{
-								if (my.userrights == URIGHTS_CLIENTID || clientid.compare(JWTsubject) == 0)
-								{
-									signingsecret = my.SigningSecret;
-									clientpubkey = my.PubKey;
-									client_key_id = std::to_string(my.ID);
-									client_password = my.Password;
-									accept_legacy_until = my.AcceptLegacyTokensUntil;
-									clientispublic = my.ActiveTabs;
-									break;
-								}
+								if (m_logger) m_logger->Debug(DebugCategory::Auth,"[JWT] Token does not contain an algorithm!");
+								return 0;
 							}
-						}
-						if (client_key_id.empty() || (signingsecret.empty() && clientpubkey.empty()))
-						{
-							if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Unable to verify token as no ClientID for the audience has been found!");
-							return 0;
-						}
-						// Step 3: Using the (hashed :( ) password of the ClientID as our ClientSecret to verify the JWT signature
-						std::string JWTalgo = decodedJWT.get_algorithm();
-						std::error_code ec;
-						// Build issuer for verification - use Host header
-						std::string expected_issuer = myWebem->m_DigistRealm;
-						const char *host_header = request::get_req_header(&req, "Host");
-						if (host_header != nullptr)
-						{
-							expected_issuer = "https://" + std::string(host_header) + "/";
-						}
-
-						// Access tokens (subject "at:<id>") are host-independent bearer tokens;
-						// skip issuer validation so they work regardless of which address is used to reach the server.
-						bool isAccessToken = JWTsubject.size() > 3 && JWTsubject.compare(0, 3, "at:") == 0;
-						auto JWTverifyer = isAccessToken
-							? jwt::verify().with_audience(clientid)
-							: jwt::verify().with_issuer(expected_issuer).with_audience(clientid);
-						if (JWTalgo.compare("HS256") == 0)
-						{
-							JWTverifyer.allow_algorithm(jwt::algorithm::hs256{ signingsecret });
-						}
-						else if (JWTalgo.compare("HS384") == 0)
-						{
-							JWTverifyer.allow_algorithm(jwt::algorithm::hs384{ signingsecret });
-						}
-						else if (JWTalgo.compare("HS512") == 0)
-						{
-							JWTverifyer.allow_algorithm(jwt::algorithm::hs512{ signingsecret });
-						}
-						else if (JWTalgo.compare("RS256") == 0)
-						{
-							JWTverifyer.allow_algorithm(jwt::algorithm::rs256{ clientpubkey });
-						}
-						else if (JWTalgo.compare("PS256") == 0)
-						{
-							JWTverifyer.allow_algorithm(jwt::algorithm::ps256{ clientpubkey });
-						}
-						else
-						{
-							if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] This token is signed with an unsupported algorithm (%s)!", JWTalgo.c_str());
-							return 0;
-						}
-						JWTverifyer.expires_at_leeway(60);	// 60 seconds leeway time in case clocks are NOT fully (NTP) synced
-						JWTverifyer.not_before_leeway(60);
-						JWTverifyer.issued_at_leeway(60);
-						JWTverifyer.verify(decodedJWT, ec);
-						if(ec)
-						{
-							// Try legacy verification with client_password if within acceptance window
-							time_t now = utils::webem_time();
-							if (accept_legacy_until > 0 && now < accept_legacy_until && !client_password.empty())
+							if(!(decodedJWT.has_audience() && decodedJWT.has_issuer()))
 							{
-								if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Trying legacy verification with client_password");
-								std::error_code legacy_ec;
-								auto LegacyVerifyer = isAccessToken
-									? jwt::verify().with_audience(clientid)
-									: jwt::verify().with_issuer(expected_issuer).with_audience(clientid);
-								if (JWTalgo.compare("HS256") == 0)
-								{
-									LegacyVerifyer.allow_algorithm(jwt::algorithm::hs256{ client_password });
-								}
-								else if (JWTalgo.compare("HS384") == 0)
-								{
-									LegacyVerifyer.allow_algorithm(jwt::algorithm::hs384{ client_password });
-								}
-								else if (JWTalgo.compare("HS512") == 0)
-								{
-									LegacyVerifyer.allow_algorithm(jwt::algorithm::hs512{ client_password });
-								}
-								LegacyVerifyer.expires_at_leeway(60);
-								LegacyVerifyer.not_before_leeway(60);
-								LegacyVerifyer.issued_at_leeway(60);
-								LegacyVerifyer.verify(decodedJWT, legacy_ec);
-								if (!legacy_ec)
-								{
-									if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Legacy token accepted (expires %ld)", (long)accept_legacy_until);
-									ec.clear();
-								}
+								if (m_logger) m_logger->Debug(DebugCategory::Auth,"[JWT] Token does not contain an intended audience and/or issuer!");
+								return 0;
 							}
-						}
-
-						if(ec)
-						{
-							if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Token not valid! (%s)", ec.message().c_str());
-							return 0;
-						}
-						// Step 4: Now also check if other mandatory claims (nbf, exp, sub) have been provided
-						if(!(decodedJWT.has_expires_at() && decodedJWT.has_not_before() && decodedJWT.has_issued_at() && decodedJWT.has_subject() && decodedJWT.has_key_id()))
-						{
-							if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Mandatory claims KID, NBF, EXP, IAT, SUB are missing!");
-							return 0;
-						}
-						// Step 5: See of the subject (intended user) is available and exists in the User table
-						std::string key_id = decodedJWT.get_key_id();
-						for (const auto &my : userpasswords)
-						{
-							if (my.Username == JWTsubject)
+							// Step 2: Find the audience = our ClientID (the username associated with the ClientID user right)
+							// has_audience() only checks that the claim exists; "aud": [] leaves
+							// it present but empty, so cbegin() == cend() and dereferencing it is
+							// undefined behaviour rather than a throw -- it needs its own check,
+							// the try/catch above does not cover it.
+							auto audience = decodedJWT.get_audience();
+							if (audience.empty())
 							{
-								if (my.userrights != URIGHTS_CLIENTID)
+								if (m_logger) m_logger->Debug(DebugCategory::Auth,"[JWT] Token audience claim is empty!");
+								return 0;
+							}
+							std::string clientid = *audience.cbegin();	// Only the first element of the AUD set is used; any additional audiences are ignored.
+							std::string JWTsubject = decodedJWT.get_subject();
+							if (m_logger) m_logger->Debug(DebugCategory::Auth,"[JWT] Token audience : %s", clientid.c_str());
+
+							std::string signingsecret;
+							std::string client_password;
+							time_t accept_legacy_until = 0;
+							std::string clientpubkey;
+							std::string client_key_id;
+							bool clientispublic = false;
+							// Check if the audience has been registered as a User (type CLIENTID)
+							for (const auto &my : userpasswords)
+							{
+								if (my.Username == clientid)
 								{
-									if (key_id.compare(client_key_id) == 0)
+									if (my.userrights == URIGHTS_CLIENTID || clientid.compare(JWTsubject) == 0)
 									{
-										if (m_logger) m_logger->Debug(DebugCategory::Auth,"[JWT] Decoded valid user (%s)", JWTsubject.c_str());
-										ah->method = "JWT";
-										ah->user = JWTsubject;
-										ah->response = my.Password;
-										ah->qop = std::to_string(my.userrights);		// Not really intended in original structure but works for passing the userrights
-										return 1;
-									}
-									else
-									{
-										if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] KID does not match (%s)!", client_key_id.c_str());
-										return 0;
+										signingsecret = my.SigningSecret;
+										clientpubkey = my.PubKey;
+										client_key_id = std::to_string(my.ID);
+										client_password = my.Password;
+										accept_legacy_until = my.AcceptLegacyTokensUntil;
+										clientispublic = my.ActiveTabs;
+										break;
 									}
 								}
 							}
+							if (client_key_id.empty() || (signingsecret.empty() && clientpubkey.empty()))
+							{
+								if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Unable to verify token as no ClientID for the audience has been found!");
+								return 0;
+							}
+							// Step 3: Using the (hashed :( ) password of the ClientID as our ClientSecret to verify the JWT signature
+							std::string JWTalgo = decodedJWT.get_algorithm();
+
+							// Bind the algorithm family the token claims to the key material actually
+							// registered for this ClientID, BEFORE any verifier is constructed. The
+							// check at the top of this loop only required "signingsecret OR
+							// clientpubkey non-empty", so a ClientID registered asymmetrically
+							// (clientispublic set, PubKey/PrivKey populated by GenerateJwtToken, no
+							// SigningSecret) still passed it -- and an HS256 token was then verified
+							// with jwt::algorithm::hs256{signingsecret} against an EMPTY string.
+							// OpenSSL's HMAC() accepts a zero-length key and happily produces a MAC,
+							// so that signature is one any attacker can compute themselves. Rejecting
+							// the algorithm/key mismatch here, rather than relying on the empty-key
+							// HMAC to somehow fail, is the actual fix; clientispublic (previously
+							// assigned and never read) is what makes this an intended per-client
+							// symmetric/asymmetric split rather than just an empty-key check.
+							bool isHmacAlgo = (JWTalgo == "HS256" || JWTalgo == "HS384" || JWTalgo == "HS512");
+							bool isAsymmetricAlgo = (JWTalgo == "RS256" || JWTalgo == "PS256");
+							if (isHmacAlgo && (clientispublic || signingsecret.empty()))
+							{
+								if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Client %s is not registered for symmetric (HS*) token verification!", clientid.c_str());
+								return 0;
+							}
+							if (isAsymmetricAlgo && (!clientispublic || clientpubkey.empty()))
+							{
+								if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Client %s is not registered for asymmetric (RS*/PS*) token verification!", clientid.c_str());
+								return 0;
+							}
+							if (!isHmacAlgo && !isAsymmetricAlgo)
+							{
+								if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] This token is signed with an unsupported algorithm (%s)!", JWTalgo.c_str());
+								return 0;
+							}
+
+							std::error_code ec;
+							// Build issuer for verification. A fixed, configured issuer is
+							// authoritative when set; otherwise fall back to deriving it from the
+							// request's own Host header, which is attacker-controlled (a client can
+							// send any Host it likes) and so verifies little beyond "the token names
+							// an issuer that resembles this request's URL". Deployments that care
+							// about issuer validation should set server_settings::jwt_expected_issuer.
+							std::string expected_issuer = myWebem->m_DigistRealm;
+							if (!myWebem->m_settings.jwt_expected_issuer.empty())
+							{
+								expected_issuer = myWebem->m_settings.jwt_expected_issuer;
+							}
+							else
+							{
+								const char *host_header = request::get_req_header(&req, "Host");
+								if (host_header != nullptr)
+								{
+									expected_issuer = "https://" + std::string(host_header) + "/";
+								}
+							}
+
+							// Access tokens (subject "at:<id>") are host-independent bearer tokens;
+							// skip issuer validation so they work regardless of which address is used to reach the server.
+							bool isAccessToken = JWTsubject.size() > 3 && JWTsubject.compare(0, 3, "at:") == 0;
+							auto JWTverifyer = isAccessToken
+								? jwt::verify().with_audience(clientid)
+								: jwt::verify().with_issuer(expected_issuer).with_audience(clientid);
+							if (JWTalgo.compare("HS256") == 0)
+							{
+								JWTverifyer.allow_algorithm(jwt::algorithm::hs256{ signingsecret });
+							}
+							else if (JWTalgo.compare("HS384") == 0)
+							{
+								JWTverifyer.allow_algorithm(jwt::algorithm::hs384{ signingsecret });
+							}
+							else if (JWTalgo.compare("HS512") == 0)
+							{
+								JWTverifyer.allow_algorithm(jwt::algorithm::hs512{ signingsecret });
+							}
+							else if (JWTalgo.compare("RS256") == 0)
+							{
+								JWTverifyer.allow_algorithm(jwt::algorithm::rs256{ clientpubkey });
+							}
+							else if (JWTalgo.compare("PS256") == 0)
+							{
+								JWTverifyer.allow_algorithm(jwt::algorithm::ps256{ clientpubkey });
+							}
+							else
+							{
+								if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] This token is signed with an unsupported algorithm (%s)!", JWTalgo.c_str());
+								return 0;
+							}
+							JWTverifyer.expires_at_leeway(60);	// 60 seconds leeway time in case clocks are NOT fully (NTP) synced
+							JWTverifyer.not_before_leeway(60);
+							JWTverifyer.issued_at_leeway(60);
+							JWTverifyer.verify(decodedJWT, ec);
+							if(ec)
+							{
+								// Try legacy verification with client_password if within acceptance window
+								time_t now = utils::webem_time();
+								if (accept_legacy_until > 0 && now < accept_legacy_until && !client_password.empty())
+								{
+									if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Trying legacy verification with client_password");
+									std::error_code legacy_ec;
+									auto LegacyVerifyer = isAccessToken
+										? jwt::verify().with_audience(clientid)
+										: jwt::verify().with_issuer(expected_issuer).with_audience(clientid);
+									if (JWTalgo.compare("HS256") == 0)
+									{
+										LegacyVerifyer.allow_algorithm(jwt::algorithm::hs256{ client_password });
+									}
+									else if (JWTalgo.compare("HS384") == 0)
+									{
+										LegacyVerifyer.allow_algorithm(jwt::algorithm::hs384{ client_password });
+									}
+									else if (JWTalgo.compare("HS512") == 0)
+									{
+										LegacyVerifyer.allow_algorithm(jwt::algorithm::hs512{ client_password });
+									}
+									LegacyVerifyer.expires_at_leeway(60);
+									LegacyVerifyer.not_before_leeway(60);
+									LegacyVerifyer.issued_at_leeway(60);
+									LegacyVerifyer.verify(decodedJWT, legacy_ec);
+									if (!legacy_ec)
+									{
+										if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Legacy token accepted (expires %ld)", (long)accept_legacy_until);
+										ec.clear();
+									}
+								}
+							}
+
+							if(ec)
+							{
+								if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Token not valid! (%s)", ec.message().c_str());
+								return 0;
+							}
+							// Step 4: Now also check if other mandatory claims (nbf, exp, sub) have been provided
+							if(!(decodedJWT.has_expires_at() && decodedJWT.has_not_before() && decodedJWT.has_issued_at() && decodedJWT.has_subject() && decodedJWT.has_key_id()))
+							{
+								if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Mandatory claims KID, NBF, EXP, IAT, SUB are missing!");
+								return 0;
+							}
+							// Step 5: See of the subject (intended user) is available and exists in the User table
+							std::string key_id = decodedJWT.get_key_id();
+							for (const auto &my : userpasswords)
+							{
+								if (my.Username == JWTsubject)
+								{
+									if (my.userrights != URIGHTS_CLIENTID)
+									{
+										if (key_id.compare(client_key_id) == 0)
+										{
+											if (m_logger) m_logger->Debug(DebugCategory::Auth,"[JWT] Decoded valid user (%s)", JWTsubject.c_str());
+											ah->method = "JWT";
+											ah->user = JWTsubject;
+											ah->response = my.Password;
+											ah->qop = std::to_string(my.userrights);		// Not really intended in original structure but works for passing the userrights
+											return 1;
+										}
+										else
+										{
+											if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] KID does not match (%s)!", client_key_id.c_str());
+											return 0;
+										}
+									}
+								}
+							}
+							if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Token contains non-existing user (%s)!", JWTsubject.c_str());
+							return 0;
 						}
-						if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Token contains non-existing user (%s)!", JWTsubject.c_str());
-						return 0;
+						catch (const std::exception &e)
+						{
+							// Covers jwt::decode() (wrong segment count, bad base64url) and
+							// parse_claims() (invalid JSON payload) -- both throw, and both are
+							// just "not a usable token", which correctly falls through to cookie
+							// authentication and, ultimately, a 401.
+							//
+							// Logged at Debug, not Error: a malformed token here is ordinary
+							// untrusted input arriving over the network, not a server-side
+							// fault. Logging it at Error would let anyone flood the error log
+							// simply by sending garbage in the Authorization header. Contrast
+							// with the HTTP parse exception, which reflects malformed request
+							// framing rather than an application-level credential and is logged
+							// at Error.
+							if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Token rejected: %s", e.what());
+							return 0;
+						}
+						catch (...)
+						{
+							if (m_logger) m_logger->Debug(DebugCategory::Auth, "[JWT] Token rejected due to an unexpected error");
+							return 0;
+						}
 					}
 				}
 				// No dot found and/or not a JWT, so assume non-JWT type of Bearer token
@@ -1835,8 +2359,17 @@ namespace http {
 		//Returns true is the connected host is in the trusted network
 		bool cWebemRequestHandler::AreWeInTrustedNetwork(const std::string &sHost)
 		{
+			// Snapshot under lock: AddTrustedNetworks/ClearTrustedNetworks can mutate
+			// m_localnetworks from any thread that reconfigures trusted networks
+			// while requests are being handled concurrently.
+			std::vector<_tIPNetwork> localnetworks;
+			{
+				std::lock_guard<std::mutex> lock(myWebem->m_configMutex);
+				localnetworks = myWebem->m_localnetworks;
+			}
+
 			//Are there any local networks to check against?
-			if (myWebem->m_localnetworks.empty())
+			if (localnetworks.empty())
 				return false;
 
 			//Is the given 'host' a valid IP address?
@@ -1847,7 +2380,7 @@ namespace http {
 			}
 			bool bIsIPv6 = (sCleanHost.find(':') != std::string::npos);
 
-			return std::any_of(myWebem->m_localnetworks.begin(), myWebem->m_localnetworks.end(),
+			return std::any_of(localnetworks.begin(), localnetworks.end(),
 					   [&](const _tIPNetwork &my) { return IsIPInRange(sCleanHost, my, bIsIPv6); });
 		}
 
@@ -1974,10 +2507,10 @@ namespace http {
 			return bCookie;
 		}
 
-		void cWebemRequestHandler::send_authorization_request(reply& rep)
+		void cWebemRequestHandler::send_authorization_request(const request& req, reply& rep)
 		{
 			rep = reply::stock_reply(reply::unauthorized, true, myWebem->m_settings.is_secure());
-			reply::add_cors_headers(&rep);
+			reply::add_cors_headers(&rep, GetRequestOrigin(req), myWebem->m_settings.allowed_cors_origins);
 			send_remove_cookie(rep);
 			if (myWebem->m_authmethod == AUTH_BASIC)
 			{
@@ -2091,13 +2624,54 @@ namespace http {
 				rep = reply::stock_reply(reply::forbidden);
 				return true;
 			}
-			// request MUST include an origin header, even if we don't check it
-			// we only "allow" connections from browser clients
+			// request MUST include an origin header; we only "allow" connections from
+			// browser clients
 			h = request::get_req_header(&req, "Origin");
 			if (h == nullptr)
 			{
 				rep = reply::stock_reply(reply::bad_request);
 				return true;
+			}
+			{
+				std::string origin = h;
+				// Enforced for every upgrade that is not carrying a session cookie.
+				//
+				// Two such cases exist, and both need this for the same reason: a
+				// trusted-network session (see CheckAuthentication, called before
+				// is_upgrade_request), and -- when no users are configured at all --
+				// a plain unauthenticated one. Neither presents a cookie, so there
+				// is nothing here for SameSite=strict to protect, and WebSocket is
+				// not subject to CORS: without this check ANY website the browser
+				// visits could open this WebSocket and read or drive the server with
+				// whatever rights it grants (docs/INTEGRATION.md, "Trusted
+				// Networks"). That a foreign page cannot READ a cross-origin HTTP
+				// response is no help here -- the same-origin policy simply does not
+				// apply to this handshake.
+				//
+				// Cookie-authenticated sessions do not need it: SameSite=strict
+				// already stops a foreign site's browser attaching that cookie.
+				if (session.istrustednetwork || session.username.empty())
+				{
+					bool originAllowed = OriginMatchesRequestHost(req, origin, myWebem->m_settings.is_secure(), myWebem->m_settings);
+					if (!originAllowed)
+					{
+						for (const auto &allowed : myWebem->m_settings.allowed_cors_origins)
+						{
+							if (allowed == origin)
+							{
+								originAllowed = true;
+								break;
+							}
+						}
+					}
+					if (!originAllowed)
+					{
+						if (m_logger) m_logger->Log(LogLevel::Status, "[web:%s] Rejected WebSocket upgrade: Origin '%s' is not allowed for a %s session", myWebem->GetPort().c_str(), origin.c_str(),
+									    session.istrustednetwork ? "trusted-network" : "cookie-less");
+						rep = reply::stock_reply(reply::forbidden);
+						return true;
+					}
+				}
 			}
 			// request MUST include a version number
 			h = request::get_req_header(&req, "Sec-Websocket-Version");
@@ -2222,7 +2796,8 @@ namespace http {
 			return false;
 		}
 
-		bool cWebemRequestHandler::CheckAuthentication(WebEmSession &session, const request &req, bool &authErr)
+		bool cWebemRequestHandler::CheckAuthentication(WebEmSession &session, const request &req, bool &authErr,
+							      bool bTrustedNetworkAllowed)
 		{
 			session.rights = URIGHTS_NONE; // no rights
 			session.id = "";
@@ -2243,7 +2818,7 @@ namespace http {
 				authErr = true;
 				return false; // No users in the system!
 			}
-			else if (AreWeInTrustedNetwork(session.remote_host))
+			else if (bTrustedNetworkAllowed && AreWeInTrustedNetwork(session.remote_host))
 			{
 				for (const auto &my : userpasswords)
 				{
@@ -2331,8 +2906,9 @@ namespace http {
 				if (!(sSID.empty() || sAuthToken.empty() || szTime.empty()))
 				{
 					time_t now = utils::webem_time();
-					WebEmSession* oldSession = myWebem->GetSession(sSID);
-					if ((oldSession != nullptr) && (oldSession->expires < now))
+					WebEmSession oldSession;
+					bool haveOldSession = myWebem->GetSession(sSID, oldSession);
+					if (haveOldSession && (oldSession.expires < now))
 					{
 						// Check if session stored in memory is not expired (prevent from spoofing expiration time)
 						expired = true;
@@ -2340,7 +2916,7 @@ namespace http {
 					if (expired)
 					{
 						//expired session, remove session
-						if (oldSession != nullptr)
+						if (haveOldSession)
 						{
 							// session exists (delete it from memory and database)
 							myWebem->RemoveSession(sSID);
@@ -2348,10 +2924,10 @@ namespace http {
 						}
 						return false;
 					}
-					if (oldSession != nullptr)
+					if (haveOldSession)
 					{
 						// session already exists
-						session = *oldSession;
+						session = oldSession;
 					}
 					else
 					{
@@ -2442,8 +3018,8 @@ namespace http {
 					return false;
 				}
 
-				WebEmSession* oldSession = myWebem->GetSession(session.id);
-				if (oldSession == nullptr)
+				WebEmSession existingSession;
+				if (!myWebem->GetSession(session.id, existingSession))
 				{
 					if (m_logger) m_logger->Debug(DebugCategory::Auth, "[web:%s] CheckAuthToken(%s_%s_%s) : restore session", myWebem->GetPort().c_str(), session.id.c_str(), session.auth_token.c_str(), session.username.c_str());
 					myWebem->AddSession(session);
@@ -2470,8 +3046,6 @@ namespace http {
 			strftime(buffer, sizeof(buffer), format, &ltime);
 			return buffer;
 		}
-
-		std::map<std::string, connection::_tRemoteClients> m_remote_web_clients;
 
 		void cWebemRequestHandler::handle_request(const request& req, reply& rep)
 		{
@@ -2514,11 +3088,21 @@ namespace http {
 			// 3a) Let's examine possible proxies, etc.
 			std::string realHost;
 			bool bUseRealHost = false;
-			if(!myWebem->findRealHostBehindProxies(req, realHost))
+			bool bHaveProxyHeaders = false;
+			bool bTrustedNetworkAllowed = true;
+			if(!myWebem->findRealHostBehindProxies(req, realHost, bHaveProxyHeaders))
 			{
 				if (m_logger) m_logger->Log(LogLevel::Error, "[web:%s]: Unable to determine origin due to improper proxy header(s) (values) being used (Possible spoofing attempt!?), dropping client request (remote address: %s)", myWebem->GetPort().c_str(), session.remote_host.c_str());
 				rep = reply::stock_reply(reply::forbidden);
 				return;
+			}
+			else if (realHost.empty() && bHaveProxyHeaders)
+			{
+				// Proxy headers were present but nothing usable survived filtering. Do not
+				// let the request keep the trust that the connecting peer's own address
+				// would confer: behind a proxy on a trusted address (commonly 127.0.0.1)
+				// that would hand administrative rights to whoever sent the bad header.
+				bTrustedNetworkAllowed = false;
 			}
 			else if (!realHost.empty())
 			{
@@ -2530,23 +3114,12 @@ namespace http {
 				}
 			}
 
-			// 3c) Check if the remote client is known and update the last seen time
-			bool bSeenBefore = true;
-			std::string remoteClientKey = session.remote_host + session.local_port;
-			auto itt_rc = m_remote_web_clients.find(remoteClientKey);
-			if (itt_rc == m_remote_web_clients.end())
-			{
-				connection::_tRemoteClients rc;
-				rc.host_remote_endpoint_address_ = session.remote_host;
-				rc.host_local_endpoint_port_ = session.local_port;
-				m_remote_web_clients[remoteClientKey] = rc;
-				itt_rc = m_remote_web_clients.find(remoteClientKey);
-				bSeenBefore = false;
-			}
-			else if (itt_rc->second.last_seen < (utils::webem_time() - SHORT_SESSION_TIMEOUT))
-				bSeenBefore = false;
-			itt_rc->second.last_seen = utils::webem_time();
-			itt_rc->second.host_last_request_uri_ = req.uri;
+			// 3c) Check if the remote client is known and update the last seen time.
+			// TrackRemoteClient owns the locking: this cache used to be a process-wide
+			// global with no synchronisation at all, corrupted by an HTTP and an HTTPS
+			// instance (each with its own io thread) doing unsynchronised find/insert
+			// on the same map concurrently.
+			bool bSeenBefore = myWebem->TrackRemoteClient(session.remote_host, session.local_port, req.uri);
 
 			// 4) Respond to CORS Preflight request (for JSON API)
 			if (req.method == "OPTIONS")
@@ -2572,7 +3145,7 @@ namespace http {
 				{
 					reply::add_header(&rep, "Content-Length", "0");
 					reply::add_header(&rep, "Access-Control-Max-Age", "3600");
-					reply::add_header_if_absent(&rep, "Access-Control-Allow-Origin", "*");
+					reply::add_cors_headers(&rep, GetRequestOrigin(req), myWebem->m_settings.allowed_cors_origins);
 					reply::add_header_if_absent(&rep, "Access-Control-Allow-Methods", "GET, POST");
 					reply::add_header_if_absent(&rep, "Access-Control-Allow-Headers", "Authorization, Content-Type");
 					return;
@@ -2582,13 +3155,13 @@ namespace http {
 				reply::add_header(&rep, "Access-Control-Max-Age", "3600");
 				reply::add_header(&rep, "Access-Control-Allow-Methods", "GET, POST");
 				reply::add_header(&rep, "Access-Control-Allow-Headers", "Authorization, Content-Type");
-				reply::add_cors_headers(&rep);
+				reply::add_cors_headers(&rep, GetRequestOrigin(req), myWebem->m_settings.allowed_cors_origins);
 				return;
 			}
 
 			// 5) Check Authentication and in case something unexpected went wrong with the authentication, we will return an internal server error and stop processing
 			bool bAuthErr = false;
-			bool isAuthenticated = CheckAuthentication(session, req, bAuthErr);	// This check also restores the session if an active session is found
+			bool isAuthenticated = CheckAuthentication(session, req, bAuthErr, bTrustedNetworkAllowed);	// This check also restores the session if an active session is found
 			if (bAuthErr)
 			{
 				rep = reply::stock_reply(reply::internal_server_error);
@@ -2630,13 +3203,42 @@ namespace http {
 			// 9) Check if the request needs to be authenticated, for pages (and actions) and WebSocket upgrades
 			bool needsAuthentication = ((isPage || isUpgradeRequest) ? !CheckAuthByPass(req) : false);
 
+			// An application with no users configured has no authentication to
+			// enforce: every page and command is already served to anyone who
+			// asks, so demanding credentials for the WebSocket upgrade alone
+			// would not protect anything -- an attacker simply uses HTTP instead
+			// -- while breaking live updates on an unprotected installation.
+			//
+			// The same-origin requirement below is NOT relaxed with it, and that
+			// distinction matters: WebSocket is not subject to CORS. A browser
+			// refuses to let a foreign page READ a cross-origin HTTP response,
+			// but places no such restriction on a WebSocket, so an unauthenticated
+			// upgrade is reachable from any site the user happens to visit in a
+			// way an unauthenticated fetch is not. is_upgrade_request() therefore
+			// still requires an Origin that matches this host (see the check in
+			// that function).
+			if (isUpgradeRequest && needsAuthentication)
+			{
+				if (myWebem->HasConfiguredUsers())
+				{
+					// Users exist: authentication is in force, upgrade included.
+				}
+				else
+				{
+					if (m_logger) m_logger->Debug(DebugCategory::Auth,
+						"[web:%s] No users configured; allowing unauthenticated WebSocket upgrade (origin still enforced)",
+						myWebem->GetPort().c_str());
+					needsAuthentication = false;
+				}
+			}
+
 			if (m_logger) m_logger->Debug(DebugCategory::Auth,"[web:%s] isPage %d isAction %d isUpgrade %d needsAuthentication %d isAuthenticated %d (%s) isNew %d", myWebem->GetPort().c_str(), isPage, isAction, isUpgradeRequest, needsAuthentication, isAuthenticated, session.username.c_str(), session.isnew);
 
 			// 10) Check if the request has proper user authentication for those pages (or actions) that require it. If not, send an Authorization request
 			if ((isPage || isAction || isUpgradeRequest) && needsAuthentication && !isAuthenticated)
 			{
 				if (m_logger) m_logger->Debug(DebugCategory::WebServer, "[web:%s] Did not find suitable Authorization!", myWebem->GetPort().c_str());
-				send_authorization_request(rep);
+				send_authorization_request(req, rep);
 				if(bUseRealHost)
 					rep.originHost = realHost;
 				return;
@@ -2768,28 +3370,26 @@ namespace http {
 			}
 			else if (!session.id.empty())	// Session found, Renew session expiration (keep auth token unchanged to avoid race conditions with concurrent requests)
 			{
-				WebEmSession* memSession = myWebem->GetSession(session.id);
-				if (memSession != nullptr)
+				// Find-and-mutate under a single lock: renewal used to be a
+				// read-modify-write through a raw pointer returned by GetSession,
+				// with no lock held across the write -- racing the session-cleaner
+				// thread's RemoveSession/ClearUserPasswords. TouchSessionExpiry
+				// does the whole thing atomically and hands back a snapshot to cookie.
+				//
+				// A fresh cookie is sent only when TouchSessionExpiry reports that
+				// renewal actually happened, not on every request: the client's
+				// existing cookie is still valid for the rest of its half-life, so
+				// re-issuing an unchanged cookie on every single request would just
+				// be wasted work for no benefit. Renew-or-nothing keeps the common
+				// case (a session nowhere near its half-life) free of any cookie or
+				// session-store write.
+				WebEmSession touchedSession;
+				if (myWebem->TouchSessionExpiry(session.id, touchedSession))
 				{
-					time_t now = utils::webem_time();
-					// Renew session expiration date if half of session duration has been exceeded ("dont remember me" sessions, 10 minutes)
-					if (memSession->expires - (SHORT_SESSION_TIMEOUT / 2) < now)
-					{
-						memSession->expires = now + SHORT_SESSION_TIMEOUT;
-						session_store_impl_ptr sstore = myWebem->GetSessionStore();
-						if (sstore != nullptr)
-							sstore->RenewSessionExpiration(memSession->id, memSession->expires);
-						send_cookie(rep, *memSession);
-					}
-					// Renew session expiration date if half of session duration has been exceeded ("remember me" sessions, 30 days)
-					else if ((memSession->expires > SHORT_SESSION_TIMEOUT + now) && (memSession->expires - (LONG_SESSION_TIMEOUT / 2) < now))
-					{
-						memSession->expires = now + LONG_SESSION_TIMEOUT;
-						session_store_impl_ptr sstore = myWebem->GetSessionStore();
-						if (sstore != nullptr)
-							sstore->RenewSessionExpiration(memSession->id, memSession->expires);
-						send_cookie(rep, *memSession);
-					}
+					session_store_impl_ptr sstore = myWebem->GetSessionStore();
+					if (sstore != nullptr)
+						sstore->RenewSessionExpiration(touchedSession.id, touchedSession.expires);
+					send_cookie(rep, touchedSession);
 				}
 			}
 		}

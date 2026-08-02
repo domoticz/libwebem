@@ -128,6 +128,15 @@ namespace utils {
     /// including an embedded NUL. Used to reject malformed/decoded request paths.
     bool contains_control_chars(const std::string& s);
 
+    /// True if the comma-separated header value `value` contains `token` as a
+    /// whole, case-insensitive element -- the form RFC 9110 s5.6.1 defines for
+    /// list-valued headers such as Connection ("keep-alive, Upgrade").
+    ///
+    /// Matching the whole header string instead would both miss "close" inside
+    /// "TE, close" and match "keep-alive" inside a token like "no-keep-alive",
+    /// so surrounding whitespace is trimmed and each element compared entire.
+    bool header_has_token(const std::string& value, const std::string& token);
+
     /// Cross-platform gettimeofday replacement.
     /// On POSIX, delegates to ::gettimeofday(). On Windows, uses GetSystemTimeAsFileTime().
     /// Namespaced to avoid linker conflicts with consumer-provided implementations.

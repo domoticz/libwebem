@@ -12,6 +12,7 @@
 #define HTTP_REPLY_H
 
 #include <string>
+#include <vector>
 #include <iterator>
 #include <boost/asio.hpp>
 #include "header.h"
@@ -45,6 +46,9 @@ struct reply
     forbidden = 403,
     not_found = 404,
     method_not_allowed = 405,
+    payload_too_large = 413,
+    uri_too_long = 414,
+    request_header_fields_too_large = 431,
     internal_server_error = 500,
     not_implemented = 501,
     bad_gateway = 502,
@@ -86,10 +90,23 @@ struct reply
   static bool set_content_from_file(reply *rep, const std::string & file_path);
   static bool set_content_from_file(reply *rep, const std::string & file_path, const std::string & attachment, bool set_content_type = false);
   static bool set_download_file(reply* rep, const std::string& file_path, const std::string& attachment);
-  static void add_header_attachment(reply *rep, const std::string & attachment);
+  /// Sets Content-Disposition: attachment; filename=<attachment>.
+  /// Returns false (and adds no header) if attachment contains a control character --
+  /// most importantly CR/LF, which would otherwise split the response. attachment is
+  /// application-supplied (e.g. a report/backup filename derived from a request
+  /// parameter), so this is the point where a bad value should be caught, not deep in
+  /// the write path.
+  static bool add_header_attachment(reply *rep, const std::string & attachment);
   static void add_header_content_type(reply *rep, const std::string & content_type);
   static void add_security_headers(reply *rep, bool is_tls = false);
-  static void add_cors_headers(reply *rep);
+  /// Adds Access-Control-Allow-Origin (with Vary: Origin) only when origin is
+  /// non-empty and present verbatim in allowed_origins -- an unvalidated Origin is
+  /// never echoed. Does nothing otherwise, which is the correct default for an API:
+  /// same-origin requests (everything the bundled web UI itself makes) never consult
+  /// this header, so omitting it cannot break them; it only stops a cross-origin page
+  /// from reading the response. Deliberately does not offer a "*" mode -- callers
+  /// that need that (genuinely public static assets) add the header directly.
+  static void add_cors_headers(reply *rep, const std::string &origin, const std::vector<std::string> &allowed_origins);
 
   template <class InputIterator>
   static void set_content(reply *rep, InputIterator first, InputIterator last) {

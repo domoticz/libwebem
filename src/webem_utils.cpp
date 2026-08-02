@@ -188,9 +188,14 @@ std::string GenerateMD5Hash(const std::string& InputString, const std::string& S
     if (!md5ctx)
         return {};
 
-    EVP_DigestInit_ex(md5ctx.get(), EVP_md5(), nullptr);
-    EVP_DigestUpdate(md5ctx.get(), cstring.c_str(), cstring.size());
-    EVP_DigestFinal_ex(md5ctx.get(), digest, &hash_length);
+    if (EVP_DigestInit_ex(md5ctx.get(), EVP_md5(), nullptr) != 1)
+        return {}; // e.g. MD5 not offered by a FIPS provider - fail closed, not with a silent empty hash
+    if (EVP_DigestUpdate(md5ctx.get(), cstring.c_str(), cstring.size()) != 1)
+        return {}; // fail closed: an empty return is deliberate, not an incidental empty hash
+    if (EVP_DigestFinal_ex(md5ctx.get(), digest, &hash_length) != 1)
+        return {}; // fail closed: an empty return is deliberate, not an incidental empty hash
+    if (hash_length > EVP_MAX_MD_SIZE)
+        return {}; // guard the mdString/digest indexing below against a hash_length OpenSSL should never hand back, but that this code should not trust blindly
 
     char mdString[(EVP_MAX_MD_SIZE * 2) + 1];
     mdString[hash_length * 2] = '\0';
@@ -211,9 +216,14 @@ std::string GenerateSHA256Hash(const std::string& InputString, const std::string
     if (!ctx)
         return {};
 
-    EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr);
-    EVP_DigestUpdate(ctx.get(), cstring.c_str(), cstring.size());
-    EVP_DigestFinal_ex(ctx.get(), digest, &hash_length);
+    if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1)
+        return {}; // fail closed: an empty return is deliberate, not an incidental empty hash
+    if (EVP_DigestUpdate(ctx.get(), cstring.c_str(), cstring.size()) != 1)
+        return {}; // fail closed: an empty return is deliberate, not an incidental empty hash
+    if (EVP_DigestFinal_ex(ctx.get(), digest, &hash_length) != 1)
+        return {}; // fail closed: an empty return is deliberate, not an incidental empty hash
+    if (hash_length > EVP_MAX_MD_SIZE)
+        return {}; // guard the out/digest indexing below against a hash_length OpenSSL should never hand back, but that this code should not trust blindly
 
     char out[(EVP_MAX_MD_SIZE * 2) + 1];
     out[hash_length * 2] = '\0';
@@ -242,6 +252,11 @@ std::string GenerateSecureToken(size_t nbytes)
     return out;
 }
 
+// An empty string never compares equal here, even to another empty string.
+// GenerateMD5Hash/GenerateSHA256Hash/GenerateSecureToken all return empty to
+// mean "generation failed", never a real digest/token, so treating two empty
+// values as a match would let a caller that forgot to check for that failure
+// accept an unauthenticated value as if it had authenticated successfully.
 bool ConstantTimeEquals(const std::string& a, const std::string& b)
 {
     // Length is not itself secret for the fixed-size hashes/tokens we compare,
@@ -249,7 +264,7 @@ bool ConstantTimeEquals(const std::string& a, const std::string& b)
     if (a.size() != b.size())
         return false;
     if (a.empty())
-        return true;
+        return false; // two empty secrets never authenticate: an empty hash means digest generation failed
     return CRYPTO_memcmp(a.data(), b.data(), a.size()) == 0;
 }
 
@@ -258,6 +273,46 @@ bool contains_control_chars(const std::string& s)
     return std::any_of(s.begin(), s.end(), [](unsigned char c) {
         return c < 0x20 || c == 0x7F;
     });
+}
+
+bool header_has_token(const std::string& value, const std::string& token)
+{
+    size_t pos = 0;
+    while (pos <= value.size())
+    {
+        size_t comma = value.find(',', pos);
+        if (comma == std::string::npos)
+            comma = value.size();
+
+        // Trim OWS around this element (RFC 9110 allows spaces and htabs).
+        size_t b = pos;
+        size_t e = comma;
+        while ((b < e) && ((value[b] == ' ') || (value[b] == '\t')))
+            ++b;
+        while ((e > b) && ((value[e - 1] == ' ') || (value[e - 1] == '\t')))
+            --e;
+
+        if ((e - b) == token.size())
+        {
+            bool same = true;
+            for (size_t i = 0; i < token.size(); ++i)
+            {
+                if (std::tolower(static_cast<unsigned char>(value[b + i]))
+                    != std::tolower(static_cast<unsigned char>(token[i])))
+                {
+                    same = false;
+                    break;
+                }
+            }
+            if (same)
+                return true;
+        }
+
+        if (comma == value.size())
+            break;
+        pos = comma + 1;
+    }
+    return false;
 }
 
 } // namespace utils

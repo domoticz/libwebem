@@ -13,6 +13,7 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <map>
 
 namespace http
 {
@@ -127,10 +128,16 @@ namespace http
 			bool is_upgrade_request(WebEmSession &session, const request &req, reply &rep);
 			std::string compute_accept_header(const std::string &websocket_key);
 			bool CheckAuthByPass(const request& req);
-			bool CheckAuthentication(WebEmSession &session, const request &req, bool &authErr);
+			/// @param bTrustedNetworkAllowed pass false to suppress the trusted-network
+			///        authentication bypass for this request. Used when proxy headers were
+			///        present but unusable, so the request must not inherit the trust that
+			///        the connecting proxy's own address would otherwise confer.
+			///        Defaults to true so existing direct callers are unaffected.
+			bool CheckAuthentication(WebEmSession &session, const request &req, bool &authErr,
+						 bool bTrustedNetworkAllowed = true);
 			bool CheckUserAuthorization(std::string &user, struct ah *ah);
 			bool AllowBasicAuth();
-			void send_authorization_request(reply &rep);
+			void send_authorization_request(const request &req, reply &rep);
 			void send_remove_cookie(reply &rep);
 			std::string generateSessionID();
 			void send_cookie(reply &rep, const WebEmSession &session);
@@ -187,12 +194,50 @@ namespace http
 			bool GenerateJwtToken(std::string &jwttoken, const std::string &clientid, const std::string &user, const uint32_t exptime, const Json::Value jwtpayload = "", const std::string &issuer = "");
 			bool FindAuthenticatedUser(std::string &user, const request &req, reply &rep);
 			bool CheckVHost(const request &req);
-			bool findRealHostBehindProxies(const request &req, std::string &realhost);
+			/// Resolve the originating client from any proxy headers on the request.
+			///
+			/// Only consults m_settings.trusted_proxy_header_family -- when that is
+			/// ProxyHeaderFamily::None (the default), proxy headers are ignored
+			/// entirely and this always returns with @p realhost empty and
+			/// @p bHaveProxyHeaders false. When a family IS configured, the other two
+			/// families are ignored completely, and a request carrying more than one
+			/// family present at once is rejected outright (see @return) rather than
+			/// guessing which chain to believe.
+			///
+			/// CRITICAL: only the RIGHTMOST entry of the chain is believed. A proxy
+			/// appends the address of whoever connected to it, so that entry is the one
+			/// our proxy wrote; everything to its left is client-supplied and forgeable.
+			/// @param realhost      set to the resolved client address, or left empty when
+			///                      there were no proxy headers, or when there were but no
+			///                      usable address survived filtering.
+			/// @param bHaveProxyHeaders set to true if the configured proxy header
+			///                      family was present. When this is true and
+			///                      @p realhost is empty, the caller must NOT let the
+			///                      request inherit the peer's trusted-network rights --
+			///                      the proxy headers were present but unusable, so the
+			///                      real client address is unknown and must not be
+			///                      assumed to be trusted.
+			/// @return false if the request carries more than one proxy header family
+			///         at once; the caller must reject the request rather than resolve
+			///         a client address from it.
+			bool findRealHostBehindProxies(const request &req, std::string &realhost, bool &bHaveProxyHeaders);
 			static bool isValidIP(std::string& ip);
 
 			void ClearUserPasswords();
+
+			/// True if any user account is configured, i.e. authentication is
+			/// actually in force for this server.
+			///
+			/// With no users, every page and command is already served to anyone
+			/// who asks, so there is nothing for a credential check to protect.
+			/// Used to decide whether a WebSocket upgrade must be authenticated:
+			/// requiring it where HTTP is open would only break live updates on an
+			/// unprotected installation without denying an attacker anything.
+			/// Takes m_configMutex, so it must not be called with that already held.
+			bool HasConfiguredUsers() const;
+
 			std::vector<_tWebUserPassword> m_userpasswords;
-			void AddTrustedNetworks(std::string network);
+			void AddTrustedNetworks(const std::string &network);
 			void ClearTrustedNetworks();
 			std::vector<_tIPNetwork> m_localnetworks;
 			void SetDigistRealm(const std::string &realm);
@@ -208,7 +253,13 @@ namespace http
 			std::string m_zippassword;
 			std::string GetPort();
 			std::string GetWebRoot();
-			WebEmSession *GetSession(const std::string &ssid);
+			/// Look up a session by id. On success, copies it into @p out under the
+			/// session lock and returns true; the copy is a private snapshot the
+			/// caller may read (or discard) without holding any lock. There is
+			/// deliberately no pointer-returning overload: a pointer into m_sessions
+			/// can be invalidated at any time by RemoveSession/ClearUserPasswords
+			/// running on the session-cleaner thread.
+			bool GetSession(const std::string &ssid, WebEmSession &out);
 			void AddSession(const WebEmSession &session);
 			void RemoveSession(const WebEmSession &session);
 			void RemoveSession(const std::string &ssid);
@@ -216,8 +267,53 @@ namespace http
 			/// logic as HTTP request processing. Called by WebSocket connections to
 			/// keep the session alive while no HTTP requests are being made.
 			void RenewSessionIfNeeded(const std::string &sessionId);
+			/// Find the session, and if it is past its half-life, extend its
+			/// expiration in place -- all under a single lock, so there is no
+			/// window where a caller reads the session, another thread mutates or
+			/// erases it, and the caller then writes back through a stale pointer.
+			/// @param out receives the (possibly just-renewed) session snapshot
+			///            whenever the session is found, whether or not it was
+			///            actually renewed. Left untouched if the session is absent.
+			/// @return true only when the session was found AND it was already past
+			///         its half-life, so renewal was actually applied. Returns false
+			///         in the two remaining cases, which @p out cannot be used to
+			///         distinguish on its own: the session does not exist (@p out is
+			///         left unmodified), or it exists but is not yet due for renewal
+			///         (@p out is still filled in with the current, unrenewed
+			///         snapshot).
+			bool TouchSessionExpiry(const std::string &ssid, WebEmSession &out);
 			std::vector<std::string> GetExpiredSessions();
 			int CountSessions();
+
+			/// Record that a request was just handled from (remoteHost, localPort),
+			/// updating its last-seen time and last-requested URI. Encapsulates all
+			/// access to m_remote_web_clients so its mutex is never touched outside
+			/// this class. Enforces the size cap on every call (evicting the oldest
+			/// entry by last_seen first, if needed) rather than relying solely on
+			/// the periodic sweep, so the bound holds between sweeps too.
+			/// @return true if this address/port pair had already been
+			/// seen within SHORT_SESSION_TIMEOUT (i.e. it is not a "first sighting").
+			bool TrackRemoteClient(const std::string &remoteHost, const std::string &localPort, const std::string &requestUri);
+			/// Current size of the recently-seen-clients cache. Exposed for
+			/// diagnostics and tests; production code has no need to read it.
+			size_t CountRemoteClients();
+			/// Evict entries from the recently-seen-clients cache that are older
+			/// than SHORT_SESSION_TIMEOUT, and cap what remains as a backstop.
+			/// Called from the periodic CleanSessions() sweep; also safe to call
+			/// directly (it does not touch the session-cleanup timer), which tests
+			/// use to exercise pruning without waiting on the real 15-minute period.
+			void PruneRemoteClients();
+			/// Point-in-time snapshot of the recently-seen-clients cache, copied
+			/// under m_remoteClientsMutex. Follows the same pattern as GetSession:
+			/// no reference or pointer into m_remote_web_clients is ever handed
+			/// out, so the caller can iterate the result freely -- including from
+			/// another thread -- without holding any lock and without risking a
+			/// dangling reference if TrackRemoteClient/PruneRemoteClients mutate
+			/// or evict entries afterwards. Since this is per-instance (unlike the
+			/// process-global map it replaced), a caller that wants a full picture
+			/// across multiple cWebem instances (e.g. separate HTTP/HTTPS servers)
+			/// must call this on each instance and merge the results itself.
+			std::vector<connection::_tRemoteClients> GetRemoteClients();
 			_eAuthenticationMethod m_authmethod;
 			// Whitelist url strings that bypass authentication checks (not used by basic-auth authentication)
 			std::vector<std::string> myWhitelistURLs;
@@ -334,8 +430,11 @@ namespace http
 
 			void CleanSessions();
 			bool sumProxyHeader(const std::string &sHeader, const request &req, std::vector<std::string> &vHeaderLines);
-			bool parseProxyHeader(const std::vector<std::string> &vHeaderLines, std::vector<std::string> &vHosts);
-			bool parseForwardedProxyHeader(const std::vector<std::string> &vHeaderLines, std::vector<std::string> &vHosts);
+			/// Appends every usable client address found in the given header lines to
+			/// @p vHosts, in wire order. Non-routable values are discarded.
+			void parseProxyHeader(const std::vector<std::string> &vHeaderLines, std::vector<std::string> &vHosts);
+			/// As parseProxyHeader, for the RFC 7239 "Forwarded" syntax.
+			void parseForwardedProxyHeader(const std::vector<std::string> &vHeaderLines, std::vector<std::string> &vHosts);
 			session_store_impl_ptr mySessionStore; /// session store
 			/// request handler specialized to handle webem requests
 			/// Rene: Beware: myRequestHandler should be declared BEFORE myServer
@@ -346,6 +445,39 @@ namespace http
 			std::string m_webRoot;
 			/// sessions management
 			std::mutex m_sessionsMutex;
+
+			/// A tracked client record together with its position in
+			/// m_remote_clients_by_last_seen, so that position can be dropped in
+			/// O(1) (given the iterator) and re-inserted in O(log n) every time the
+			/// record is touched, instead of an O(n) scan to find where it belongs.
+			struct _tRemoteClientRecord
+			{
+				connection::_tRemoteClients info;
+				std::multimap<time_t, std::string>::iterator lru_it;
+			};
+
+			/// Cache of distinct client addresses recently seen, keyed by
+			/// remote_host + local_port (see handle_request). Formerly a
+			/// process-wide global, so an HTTP and an HTTPS cWebem instance --
+			/// each with its own io thread -- did unsynchronised find/insert on
+			/// the same map. Now scoped per-instance and protected by its own
+			/// mutex; pruned and size-capped in PruneRemoteClients(), and also
+			/// capped inline by TrackRemoteClient() so the bound holds between
+			/// sweeps.
+			std::map<std::string, _tRemoteClientRecord> m_remote_web_clients;
+			/// Secondary index over m_remote_web_clients ordered by last_seen
+			/// (oldest first), so the eviction candidate is always
+			/// m_remote_clients_by_last_seen.begin() -- an O(log n) lookup instead
+			/// of an O(n) scan of a map that can hold up to MAX_REMOTE_WEB_CLIENTS
+			/// entries. The mapped string is the corresponding key in
+			/// m_remote_web_clients. Kept in sync with it under the same mutex.
+			std::multimap<time_t, std::string> m_remote_clients_by_last_seen;
+			std::mutex m_remoteClientsMutex;
+			/// Evict the single oldest entry (by last_seen) from
+			/// m_remote_web_clients and its index. No-op if the cache is empty.
+			/// Caller must already hold m_remoteClientsMutex.
+			void EvictOldestRemoteClientLocked();
+
 			boost::asio::io_context m_io_context;
 			boost::asio::steady_timer m_session_clean_timer;
 			std::shared_ptr<std::thread> m_io_context_thread;

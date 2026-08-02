@@ -77,8 +77,7 @@ public:
 			buffer.append(",\n");
 		}
 		buffer.append("]");
-		static std::string ret = buffer;
-		return ret;
+		return buffer;
 	}
 
 	/** Check existing values */

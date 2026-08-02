@@ -19,13 +19,16 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ libboost-thread-dev libssl-dev zlib1g-dev
+          sudo apt-get install -y cmake g++ libboost-thread-dev libssl-dev zlib1g-dev python3 openssl
 
       - name: Build (SSL enabled)
         run: |
           mkdir build && cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DWEBEM_ENABLE_SSL=ON -DWEBEM_ENABLE_ZIP=OFF -DWEBEM_ENABLE_FASTCGI=OFF
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DWEBEM_ENABLE_SSL=ON -DWEBEM_ENABLE_ZIP=OFF -DWEBEM_ENABLE_FASTCGI=OFF -DWEBEM_BUILD_TESTS=ON
           make -j$(nproc)
+
+      - name: Test (SSL enabled)
+        run: ctest --test-dir build --output-on-failure
 
       - name: Build (minimal, no SSL)
         run: |

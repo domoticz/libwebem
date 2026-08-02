@@ -22,6 +22,38 @@ option(WEBEM_ENABLE_GZIP     "Enable GZip compression (requires zlib)" ON)
 option(WEBEM_BUILD_EXAMPLES  "Build example applications"            OFF)
 option(WEBEM_BUILD_TESTS    "Build unit tests"           OFF)
 option(BUILD_SHARED_LIBS    "Build shared library"       OFF)
+option(WEBEM_ENABLE_ASAN    "Build with AddressSanitizer" OFF)
+
+# AddressSanitizer, opt-in. This library has memory-safety-sensitive code paths
+# (session lifetime handling, per-download buffer ownership, JWT payload
+# parsing) where a use-after-free, a leaked heap allocation, or undefined
+# behaviour on malformed input would silently pass a plain Debug build -- ASan
+# is what makes those fail loudly instead. MSVC has supported /fsanitize=address
+# since VS 16.9 but has no ThreadSanitizer equivalent; data races around shared
+# connection state are only checkable with TSan on a non-MSVC toolchain.
+#
+# The MSVC ASan runtime is a DLL (clang_rt.asan_dynamic-x86_64.dll) that ships
+# with the toolchain rather than next to the built binaries, so it must be on
+# PATH at run time or every ASan-built executable fails to start -- see
+# tests/README.md for where to find it.
+#
+# Applied at directory scope, before any targets are declared, so it covers the
+# webem library itself and everything under tests/.
+if(WEBEM_ENABLE_ASAN)
+    if(MSVC)
+        add_compile_options(/fsanitize=address)
+        # ASan's shadow-memory instrumentation is incompatible with MSVC's
+        # /RTC runtime checks (auto-enabled in Debug) and with incremental
+        # linking; both must come out or the build/link fails outright.
+        foreach(_flags_var CMAKE_CXX_FLAGS_DEBUG CMAKE_C_FLAGS_DEBUG)
+            string(REGEX REPLACE "/RTC[1csu]*" "" ${_flags_var} "${${_flags_var}}")
+        endforeach()
+        add_link_options($<$<CONFIG:Debug>:/INCREMENTAL:NO>)
+    else()
+        add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+        add_link_options(-fsanitize=address)
+    endif()
+endif()
 
 # Core source files (in src/)
 set(WEBEM_SOURCES
