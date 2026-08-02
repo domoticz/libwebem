@@ -76,3 +76,14 @@ ipch/
 *.orig
 *.bak
 __pycache__/
+
+# Planning / working documents -- never committed or pushed
+Plans/
+
+# Stray databases left by test runs
+domoticz.db
+domoticz.db-shm
+domoticz.db-wal
+
+# Local Claude Code tooling config
+.claude/
