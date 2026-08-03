@@ -887,10 +887,24 @@ static void test_proxy_header_resolution()
     CHECK(host.empty());
     CHECK(present == false);
 
-    // Two families present at once, one of them the configured family, has no safe
-    // interpretation and must be rejected outright.
-    CHECK(resolve(make_request({{"Forwarded", "for=8.8.8.8"}, {"X-Forwarded-For", "9.9.9.9"}})) == false);
-    CHECK(resolve(make_request({{"X-Real-IP", "8.8.8.8"}, {"X-Forwarded-For", "9.9.9.9"}})) == false);
+    // Several families present at once is NOT a rejection: only the configured
+    // family is ever parsed, so the others cannot change the answer. Rejecting
+    // here made every request through nginx Proxy Manager, which writes
+    // X-Forwarded-For and X-Real-IP together, fail with 403
+    // (domoticz/domoticz#6939). In both cases the configured family decides and
+    // the value from the non-configured one is nowhere to be seen.
+    CHECK(resolve(make_request({{"Forwarded", "for=8.8.8.8"}, {"X-Forwarded-For", "9.9.9.9"}})) == true);
+    CHECK(host == "9.9.9.9");
+    CHECK(present == true);
+    CHECK(resolve(make_request({{"X-Real-IP", "8.8.8.8"}, {"X-Forwarded-For", "9.9.9.9"}})) == true);
+    CHECK(host == "9.9.9.9");
+    CHECK(present == true);
+
+    // Two non-configured families together are likewise inert: neither is read,
+    // so this is indistinguishable from a request carrying no proxy headers.
+    CHECK(resolve(make_request({{"Forwarded", "for=8.8.8.8"}, {"X-Real-IP", "7.7.7.7"}})) == true);
+    CHECK(host.empty());
+    CHECK(present == false);
 
     // ---- family = Forwarded: RFC 7239 syntax, including the operator-precedence
     // regression (the value was only ever parsed when "for=" sat at offset 0).
