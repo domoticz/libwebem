@@ -121,7 +121,8 @@ nothing until configured:
   Until set, no `X-Forwarded-For` / `Forwarded` / `X-Real-IP` header is consulted
   at all, and the peer address is used. Setting it wrong is worse than leaving it
   unset: it names which header your proxy actually writes, and everything else is
-  ignored. Two families arriving at once is refused outright.
+  ignored — including when several families arrive on the same request, which is
+  normal (nginx Proxy Manager writes `X-Forwarded-For` and `X-Real-IP` together).
 - `allowed_hosts` — validates the `Host` header on every request. Without it,
   DNS rebinding against a trusted-network deployment is not blocked.
 - `max_connections_per_ip` — 0 (disabled), because behind a proxy every client

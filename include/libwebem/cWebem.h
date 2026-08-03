@@ -200,9 +200,9 @@ namespace http
 			/// ProxyHeaderFamily::None (the default), proxy headers are ignored
 			/// entirely and this always returns with @p realhost empty and
 			/// @p bHaveProxyHeaders false. When a family IS configured, the other two
-			/// families are ignored completely, and a request carrying more than one
-			/// family present at once is rejected outright (see @return) rather than
-			/// guessing which chain to believe.
+			/// families are ignored completely -- never read, so their presence on the
+			/// same request cannot influence the result and is not grounds for
+			/// rejection (proxies routinely write several at once).
 			///
 			/// CRITICAL: only the RIGHTMOST entry of the chain is believed. A proxy
 			/// appends the address of whoever connected to it, so that entry is the one
@@ -217,9 +217,10 @@ namespace http
 			///                      the proxy headers were present but unusable, so the
 			///                      real client address is unknown and must not be
 			///                      assumed to be trusted.
-			/// @return false if the request carries more than one proxy header family
-			///         at once; the caller must reject the request rather than resolve
-			///         a client address from it.
+			/// @return false if the request must be rejected outright rather than have
+			///         a client address resolved from it. No current condition returns
+			///         false; the contract is kept so the caller stays correct if one
+			///         is reintroduced.
 			bool findRealHostBehindProxies(const request &req, std::string &realhost, bool &bHaveProxyHeaders);
 			static bool isValidIP(std::string& ip);
 

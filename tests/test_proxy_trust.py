@@ -225,22 +225,34 @@ def main():
               "Forwarded is not the configured family and is ignored, peer trust still applies "
               "(status=%s, body=%s)" % (status, body))
 
-        print("\n[ambiguous chains] the configured family alongside a DIFFERENT family present")
-        print("                   at the same time must be rejected outright")
-        # A spoofed Forwarded header sitting next to a legitimate-looking
-        # X-Forwarded-For. Whether or not the X-Forwarded-For value alone would have
-        # been trusted, the request as a whole is rejected -- there is no safe way to
-        # decide which of two independently attacker-reachable chains to believe, so
-        # the spoof (and the request) has no effect either way.
+        print("\n[several families] a spoofed non-configured family alongside the configured")
+        print("                   one is served normally, and the spoof has no effect")
+        # A spoofed Forwarded header sitting next to the X-Forwarded-For our proxy
+        # wrote. The request must NOT be rejected -- Forwarded is not the configured
+        # family and is never read, so it cannot change who we think the client is.
+        # 203.0.113.9 is a routable, untrusted address, so the outcome is decided by
+        # X-Forwarded-For alone: served, but not as admin.
         status, body = whoami(p, "Forwarded: for=127.0.0.1\r\nX-Forwarded-For: 203.0.113.9\r\n")
-        check(status == 403, "Forwarded + X-Forwarded-For together -> 403 (status=%s, body=%s)" % (status, body))
+        check(status != 403, "Forwarded + X-Forwarded-For together is not rejected (status=%s)" % status)
         check(body is None or body.get("rights") != URIGHTS_ADMIN,
-              "...and admin is definitely not granted either way")
+              "...and the spoofed loopback in Forwarded does not grant admin")
 
-        print("\n[ambiguous chains] the same rejection applies to any two families present,")
-        print("                   not just \"configured family + one other\"")
+        print("\n[several families] the real-world nginx Proxy Manager shape:")
+        print("                   X-Real-IP and X-Forwarded-For written together (#6939)")
+        # NPM sets both on every request. This previously 403'd the entire site.
+        # X-Real-IP is not the configured family, so only X-Forwarded-For decides.
         status, body = whoami(p, "X-Real-IP: 8.8.8.8\r\nX-Forwarded-For: 8.8.8.8\r\n")
-        check(status == 403, "X-Real-IP + X-Forwarded-For together -> 403 (status=%s, body=%s)" % (status, body))
+        check(status != 403, "X-Real-IP + X-Forwarded-For together is not rejected (status=%s)" % status)
+        check(body is None or body.get("rights") != URIGHTS_ADMIN,
+              "...and a remote client address still does not grant admin")
+
+        print("\n[several families] a non-configured family cannot smuggle trust in")
+        print("                   when the configured one is absent")
+        # X-Forwarded-For absent, so the peer address decides (peer is trusted here).
+        # The point is that X-Real-IP's forged loopback is not what granted it: the
+        # baseline with no headers at all gives the same answer.
+        status, body = whoami(p, "X-Real-IP: 127.0.0.1\r\nForwarded: for=127.0.0.1\r\n")
+        check(status != 403, "two non-configured families together are not rejected (status=%s)" % status)
 
     # ---- family = forwarded: spot-check the RFC 7239 syntax path ----
     print("\n=== trusted_proxy_header_family = Forwarded ===")

@@ -25,6 +25,11 @@ namespace server {
 /// Which family of proxy-forwarded-client-address header (if any) libwebem is
 /// permitted to trust when resolving the real client behind a reverse proxy.
 /// See server_settings::trusted_proxy_header_family for the reasoning.
+///
+/// The numeric values are persisted by consumers (Domoticz stores this as a
+/// user preference) and range-checked as [None, XRealIP], so keep None first
+/// and XRealIP last, and do not renumber: a new family goes before XRealIP or
+/// the consumer's bounds check has to be updated with it.
 enum class ProxyHeaderFamily {
 	None = 0,	// Proxy headers are not consulted at all (default).
 	Forwarded,	// RFC 7239 "Forwarded"

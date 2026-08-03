@@ -1559,6 +1559,13 @@ namespace http {
 
 		bool cWebem::findRealHostBehindProxies(const request &req, std::string &realhost, bool &bHaveProxyHeaders)
 		{
+			// NOTE: every path below returns true -- there is currently no condition
+			// that rejects a request outright, so the caller's 403 branch is not
+			// reachable today. Both are kept deliberately: the bool contract means a
+			// future rejection reason can be added here without the caller having to
+			// change, and dropping it would be a fourth incompatible public-symbol
+			// change on the heels of the three in the last security release.
+			//
 			// Checking for 3 possible headers:
 			// "Forwarded"	RFC7239  (https://www.rfc-editor.org/rfc/rfc7239)
 			// "X-Forwarded-For" The defacto standard header used by many web/proxy servers (https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Forwarded-For)
@@ -1584,10 +1591,18 @@ namespace http {
 				return true;
 			}
 
-			// Collect each family's raw header lines up front -- purely to detect
-			// whether more than one family is present on this request. Only the
-			// configured family's lines are ever parsed into candidate hosts below;
-			// the others are never consulted for their content.
+			// Only the configured family's lines are ever parsed into candidate hosts
+			// below; the other two are never consulted for their content, so their
+			// presence on the request cannot influence the outcome.
+			//
+			// An earlier revision rejected any request carrying more than one family
+			// outright, reasoning by analogy with two disagreeing Content-Length
+			// headers. The analogy does not hold: both Content-Length values feed the
+			// same framing decision, whereas a non-configured family here is simply
+			// never read. The rejection therefore bought no security while breaking
+			// every deployment behind a proxy that writes more than one header --
+			// nginx Proxy Manager sends X-Forwarded-For and X-Real-IP together by
+			// default, which made every proxied request 403 (domoticz/domoticz#6939).
 			std::vector<std::string> forwardedLines;
 			std::vector<std::string> xForwardedForLines;
 			std::vector<std::string> xRealIpLines;
@@ -1595,21 +1610,13 @@ namespace http {
 			bool haveXForwardedFor = sumProxyHeader("x-forwarded-for", req, xForwardedForLines);
 			bool haveXRealIp = sumProxyHeader("x-real-ip", req, xRealIpLines);
 
-			int familiesPresent = (haveForwarded ? 1 : 0) + (haveXForwardedFor ? 1 : 0) + (haveXRealIp ? 1 : 0);
-			if (familiesPresent > 1)
-			{
-				// A request carrying more than one proxy-header family has no safe
-				// interpretation: each family is an independent, attacker-reachable
-				// chain, and they can disagree about who the client is. This is the
-				// same reasoning applied to a request carrying two disagreeing
-				// Content-Length headers -- reject outright rather than guessing
-				// which chain to believe.
-				if (m_logger)
-					m_logger->Log(LogLevel::Status,
-						      "[web:%s] Request carries more than one proxy-forwarding header family; rejecting as ambiguous",
-						      GetPort().c_str());
-				return false;
-			}
+			// Diagnostic only, and at Debug level: a non-configured family is remotely
+			// settable, so logging it at Status would let a client drive an operator's
+			// disk -- the same reason malformed-request logging sits at Debug.
+			if (m_logger && ((haveForwarded ? 1 : 0) + (haveXForwardedFor ? 1 : 0) + (haveXRealIp ? 1 : 0)) > 1)
+				m_logger->Debug(DebugCategory::Auth,
+						"[web:%s] Request carries more than one proxy-forwarding header family; only the configured one is read",
+						GetPort().c_str());
 
 			std::vector<std::string> hosts;
 

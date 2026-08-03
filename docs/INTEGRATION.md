@@ -277,10 +277,11 @@ settings.trusted_proxy_header_family = http::server::ProxyHeaderFamily::XForward
 ```
 
 Once set, **only that family is consulted**; the other two are ignored completely,
-even when present. If a request carries more than one family at once, it is rejected
-outright (403) — two independently attacker-reachable chains that might disagree have
-no safe interpretation, the same reasoning already applied to a request carrying two
-disagreeing `Content-Length` headers.
+even when present. A request carrying several families at once is *not* rejected —
+the families you did not configure are never read, so they cannot change the outcome.
+This matters in practice: nginx Proxy Manager writes `X-Forwarded-For` and `X-Real-IP`
+on every request by default, and plenty of hand-written nginx configs do the same.
+Presence of more than one family is logged at Debug level under the `Auth` category.
 
 When the connecting peer is in a trusted network and the configured family is present,
 libwebem recovers the originating client from it and uses that address for the
