@@ -148,6 +148,13 @@ else()
     target_compile_definitions(webem PUBLIC WEBEM_NO_GZIP)
 endif()
 
+if(NOT WEBEM_ENABLE_FASTCGI)
+    # src/fastcgi.cpp is left out of WEBEM_SOURCES above, so the PHP hand-off in
+    # request_handler.cpp has to be compiled out with it or the library does not
+    # link (undefined reference to fastcgi_parser::handlePHP).
+    target_compile_definitions(webem PUBLIC WEBEM_NO_FASTCGI)
+endif()
+
 # jsoncpp - 3-tier: parent target → find_package → FetchContent
 #
 # PUBLIC, not PRIVATE: include/libwebem/cWebem.h includes <json/json.h>, so

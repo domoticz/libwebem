@@ -9,7 +9,9 @@
 //
 #include "webem_stdafx.h"
 #include <libwebem/request_handler.h>
+#ifndef WEBEM_NO_FASTCGI
 #include "fastcgi.h"
+#endif
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
@@ -308,6 +310,11 @@ void request_handler::handle_request(const request &req, reply &rep, modify_info
 	// For PHP files, we hand-over the processing to the PHP processor and are done
 	if (extension == "php")
 	{
+#ifdef WEBEM_NO_FASTCGI
+		// Built without FastCGI: there is no PHP processor to hand off to.
+		rep = reply::stock_reply(reply::not_implemented);
+		return;
+#else
 		if (!myWebem->m_settings.is_php_enabled())
 		{
 			rep = reply::stock_reply(reply::not_implemented);
@@ -319,6 +326,7 @@ void request_handler::handle_request(const request &req, reply &rep, modify_info
 		//Later we should add FastCGI support, or at least provide some environment variables
 		fastcgi_parser::handlePHP(myWebem->m_settings, request_path, req, rep, mInfo, m_logger);
 		return;
+#endif
 	}
 
 	// ------------
