@@ -149,17 +149,24 @@ else()
 endif()
 
 # jsoncpp - 3-tier: parent target → find_package → FetchContent
+#
+# PUBLIC, not PRIVATE: include/libwebem/cWebem.h includes <json/json.h>, so
+# anything that consumes that header needs jsoncpp's include directories too.
+# With PRIVATE they do not propagate, and every target linking webem fails to
+# compile unless jsoncpp happens to sit somewhere already searched (a system
+# install under /usr/include). That masked the breakage until the test targets
+# were added and CI, which has no libjsoncpp-dev, fell through to FetchContent.
 if(TARGET jsoncpp_static)
     message(STATUS "webem: using parent-provided jsoncpp_static target")
-    target_link_libraries(webem PRIVATE jsoncpp_static)
+    target_link_libraries(webem PUBLIC jsoncpp_static)
 elseif(TARGET jsoncpp_lib)
     message(STATUS "webem: using parent-provided jsoncpp_lib target")
-    target_link_libraries(webem PRIVATE jsoncpp_lib)
+    target_link_libraries(webem PUBLIC jsoncpp_lib)
 else()
     find_package(jsoncpp QUIET)
     if(jsoncpp_FOUND)
         message(STATUS "webem: using system jsoncpp")
-        target_link_libraries(webem PRIVATE jsoncpp_lib)
+        target_link_libraries(webem PUBLIC jsoncpp_lib)
     else()
         message(STATUS "webem: fetching jsoncpp 1.9.6 via FetchContent")
         set(JSONCPP_WITH_TESTS              OFF CACHE BOOL "" FORCE)
@@ -174,7 +181,7 @@ else()
             GIT_SHALLOW    TRUE
         )
         FetchContent_MakeAvailable(jsoncpp)
-        target_link_libraries(webem PRIVATE jsoncpp_static)
+        target_link_libraries(webem PUBLIC jsoncpp_static)
     endif()
 endif()
 
