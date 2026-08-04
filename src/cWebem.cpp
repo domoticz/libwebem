@@ -933,7 +933,7 @@ namespace http {
 				{
 					reply::add_header(&rep, "Cache-Control", "no-cache");
 					reply::add_header(&rep, "Pragma", "no-cache");
-					reply::add_cors_headers(&rep, GetRequestOrigin(req), m_settings.allowed_cors_origins);
+					ApplyCorsHeaders(rep, req);
 				}
 				else
 				{
@@ -1098,6 +1098,28 @@ namespace http {
 			0b11111110, //
 		};
 
+		/// Pure network-range membership test shared by
+		/// cWebemRequestHandler::IsIPInRange (trusted-network authentication) and
+		/// cWebem::IsHostInTrustedNetworks (CORS policy). `ip` must already be a
+		/// validated presentation-format address (see cWebem::isValidIP).
+		static bool IsIPInNetworkRange(const std::string &ip, const _tIPNetwork &ipnetwork, const bool bIsIPv6)
+		{
+			if (ipnetwork.bIsIPv6 != bIsIPv6)
+				return false;	// No need to check when the IP address and the network are not both IPv4 or IPv6
+
+			uint8_t IP[16] = { 0 };
+			if (inet_pton((!bIsIPv6) ? AF_INET : AF_INET6, ip.c_str(), &IP) != 1)
+				return false;
+
+			// Determine if the IP address is within the network range
+			int iASize = (!bIsIPv6) ? 4 : 16;
+			for (int ii = 0; ii < iASize; ii++)
+				if (ipnetwork.Network[ii] != (IP[ii] & ipnetwork.Mask[ii]))
+					return false;
+
+			return true;
+		}
+
 		void cWebem::AddTrustedNetworks(const std::string &network)
 		{
 			if (network.empty())
@@ -1235,6 +1257,83 @@ namespace http {
 		{
 			std::lock_guard<std::mutex> lock(m_configMutex);
 			m_localnetworks.clear();
+		}
+
+		bool cWebem::IsHostInTrustedNetworks(const std::string &sHost)
+		{
+			// Snapshot under lock: AddTrustedNetworks/ClearTrustedNetworks can mutate
+			// m_localnetworks from any thread that reconfigures trusted networks
+			// while requests are being handled concurrently.
+			std::vector<_tIPNetwork> localnetworks;
+			{
+				std::lock_guard<std::mutex> lock(m_configMutex);
+				localnetworks = m_localnetworks;
+			}
+			if (localnetworks.empty())
+				return false;
+
+			// Not a status-level log on failure here (unlike AreWeInTrustedNetwork):
+			// hostname origins are perfectly normal traffic on the CORS path and
+			// simply do not match, by design.
+			std::string sCleanHost = sHost;
+			if (!isValidIP(sCleanHost))
+				return false;
+			const bool bIsIPv6 = (sCleanHost.find(':') != std::string::npos);
+
+			return std::any_of(localnetworks.begin(), localnetworks.end(),
+					   [&](const _tIPNetwork &my) { return IsIPInNetworkRange(sCleanHost, my, bIsIPv6); });
+		}
+
+		bool cWebem::IsCorsOriginAllowed(const std::string &origin)
+		{
+			if (origin.empty())
+				return false;
+
+			std::vector<std::string> allowed;
+			bool bAllowTrusted;
+			{
+				std::lock_guard<std::mutex> lock(m_configMutex);
+				allowed = m_settings.allowed_cors_origins;
+				bAllowTrusted = m_settings.cors_allow_trusted_networks;
+			}
+
+			for (const auto &entry : allowed)
+			{
+				// "*" is the explicit allow-any opt-out; see server_settings.
+				if (entry == origin || entry == "*")
+					return true;
+			}
+			if (bAllowTrusted)
+			{
+				// Only IP-literal origins can match the trusted-network ranges;
+				// hostname origins are never resolved (see server_settings).
+				std::string originHost = ExtractOriginHost(origin, "http://");
+				if (originHost.empty())
+					originHost = ExtractOriginHost(origin, "https://");
+				if (!originHost.empty())
+					return IsHostInTrustedNetworks(originHost);
+			}
+			return false;
+		}
+
+		void cWebem::ApplyCorsHeaders(reply &rep, const request &req)
+		{
+			const std::string origin = GetRequestOrigin(req);
+			if (origin.empty())
+				return;
+			if (IsCorsOriginAllowed(origin))
+			{
+				// Route the echo through add_cors_headers so its guarantees (exact
+				// origin only, never a literal "*", Vary: Origin) apply unchanged.
+				reply::add_cors_headers(&rep, origin, { origin });
+			}
+		}
+
+		void cWebem::SetCorsPolicy(const std::vector<std::string> &origins, const bool bAllowTrustedNetworks)
+		{
+			std::lock_guard<std::mutex> lock(m_configMutex);
+			m_settings.allowed_cors_origins = origins;
+			m_settings.cors_allow_trusted_networks = bAllowTrustedNetworks;
 		}
 
 		void cWebem::SetDigistRealm(const std::string &realm)
@@ -1878,7 +1977,7 @@ namespace http {
 			if (user.empty())
 			{
 				rep = reply::stock_reply(reply::unauthorized, true, m_settings.is_secure());
-				reply::add_cors_headers(&rep, GetRequestOrigin(req), m_settings.allowed_cors_origins);
+				ApplyCorsHeaders(rep, req);
 				std::string szAuthHeader = "Basic realm=\"" + m_DigistRealm + "\"";
 				reply::add_header(&rep, "WWW-Authenticate", szAuthHeader);
 			}
@@ -2346,17 +2445,8 @@ namespace http {
 
 		bool cWebemRequestHandler::IsIPInRange(const std::string &ip, const _tIPNetwork &ipnetwork, const bool &bIsIPv6)
 		{
-			if (ipnetwork.bIsIPv6 != bIsIPv6)
-				return false;	// No need to check the IP address and the network are not both IPv4 or IPv6
-
-			uint8_t IP[16] = { 0 };
-			inet_pton((!bIsIPv6) ? AF_INET : AF_INET6, ip.c_str(), &IP);	// We already checked if this works in the caller routine
-
-			// Determine if the IP address is within the localnetwork range
-			int iASize = (!bIsIPv6) ? 4 : 16;
-			for (int ii = 0; ii < iASize; ii++)
-				if (ipnetwork.Network[ii] != (IP[ii] & ipnetwork.Mask[ii]))
-					return false;
+			if (!IsIPInNetworkRange(ip, ipnetwork, bIsIPv6))
+				return false;
 
 			// As all segments of the given IP fit within the given network range, otherwise we wouldn't be here
 			if (m_logger) m_logger->Debug(DebugCategory::WebServer,"[web:%s] IP (%s) is within Trusted network range!",myWebem->GetPort().c_str(), ip.c_str());
@@ -2517,7 +2607,7 @@ namespace http {
 		void cWebemRequestHandler::send_authorization_request(const request& req, reply& rep)
 		{
 			rep = reply::stock_reply(reply::unauthorized, true, myWebem->m_settings.is_secure());
-			reply::add_cors_headers(&rep, GetRequestOrigin(req), myWebem->m_settings.allowed_cors_origins);
+			myWebem->ApplyCorsHeaders(rep, req);
 			send_remove_cookie(rep);
 			if (myWebem->m_authmethod == AUTH_BASIC)
 			{
@@ -2662,14 +2752,11 @@ namespace http {
 					bool originAllowed = OriginMatchesRequestHost(req, origin, myWebem->m_settings.is_secure(), myWebem->m_settings);
 					if (!originAllowed)
 					{
-						for (const auto &allowed : myWebem->m_settings.allowed_cors_origins)
-						{
-							if (allowed == origin)
-							{
-								originAllowed = true;
-								break;
-							}
-						}
+						// Same policy as the HTTP CORS headers (explicit list, "*"
+						// opt-out, optional trusted-network origins): an origin
+						// allowed to read the API cross-origin is equally allowed
+						// to open this WebSocket.
+						originAllowed = myWebem->IsCorsOriginAllowed(origin);
 					}
 					if (!originAllowed)
 					{
@@ -3152,7 +3239,7 @@ namespace http {
 				{
 					reply::add_header(&rep, "Content-Length", "0");
 					reply::add_header(&rep, "Access-Control-Max-Age", "3600");
-					reply::add_cors_headers(&rep, GetRequestOrigin(req), myWebem->m_settings.allowed_cors_origins);
+					myWebem->ApplyCorsHeaders(rep, req);
 					reply::add_header_if_absent(&rep, "Access-Control-Allow-Methods", "GET, POST");
 					reply::add_header_if_absent(&rep, "Access-Control-Allow-Headers", "Authorization, Content-Type");
 					return;
@@ -3162,7 +3249,7 @@ namespace http {
 				reply::add_header(&rep, "Access-Control-Max-Age", "3600");
 				reply::add_header(&rep, "Access-Control-Allow-Methods", "GET, POST");
 				reply::add_header(&rep, "Access-Control-Allow-Headers", "Authorization, Content-Type");
-				reply::add_cors_headers(&rep, GetRequestOrigin(req), myWebem->m_settings.allowed_cors_origins);
+				myWebem->ApplyCorsHeaders(rep, req);
 				return;
 			}
 

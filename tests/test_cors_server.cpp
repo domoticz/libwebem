@@ -23,6 +23,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <vector>
 
 using namespace http::server;
 
@@ -97,6 +98,41 @@ int main(int argc, char **argv)
 		[](WebEmSession &, const request &, reply &rep) {
 			rep.status = reply::ok;
 			rep.content = R"({"ok":true})";
+		},
+		/*bypassAuthentication=*/true);
+
+	// Runtime CORS-policy switch, driving cWebem::SetCorsPolicy() exactly the way
+	// a hosting application's settings page would:
+	//   /setcors.htm?origins=<semicolon-separated-list>&trusted=<0|1>
+	// Lets the driver prove the "*" opt-out, the trusted-network origin echo, and
+	// that the policy can be tightened again afterwards -- all without a restart.
+	server.RegisterPageCode(
+		"/setcors.htm",
+		[&server](WebEmSession &, const request &req, reply &rep) {
+			auto get_param = [&req](const std::string &name) -> std::string {
+				const std::string key = name + "=";
+				std::size_t pos = req.uri.find(key);
+				if (pos == std::string::npos)
+					return std::string();
+				pos += key.size();
+				std::size_t end = req.uri.find('&', pos);
+				return req.uri.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+			};
+			std::vector<std::string> origins;
+			std::string olist = get_param("origins");
+			while (!olist.empty())
+			{
+				std::size_t sep = olist.find(';');
+				std::string entry = olist.substr(0, sep);
+				if (!entry.empty())
+					origins.push_back(entry);
+				if (sep == std::string::npos)
+					break;
+				olist.erase(0, sep + 1);
+			}
+			server.SetCorsPolicy(origins, get_param("trusted") == "1");
+			rep.status = reply::ok;
+			rep.content = "OK";
 		},
 		/*bypassAuthentication=*/true);
 

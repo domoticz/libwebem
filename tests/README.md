@@ -27,7 +27,7 @@ This directory holds two kinds of tests:
 | `test_accept_resilience.py` | The accept loop keeps re-arming itself after accept-time errors (a connection reset before accept, or exceeding the connection cap) instead of silently dying and leaving the listener unreachable until a restart. |
 | `test_auth_hardening.py` | A malformed `Authorization` header (too few JWT segments, non-JSON payload, an empty `"aud"` array) is rejected without taking the server thread down or hitting undefined behaviour; a validly signed token still authenticates; a wrong signature is rejected. |
 | `test_download_leak.py` | Many completed and aborted `download_file` responses do not grow the server's committed memory (the per-download 16 KB buffer leak); an attachment name containing control characters is rejected as a 500 rather than silently streaming the file with no `Content-Disposition` header. |
-| `test_cors.py` | API/page responses carry no CORS header by default; an unlisted Origin gets nothing; an allow-listed Origin is echoed exactly with `Vary: Origin`; static assets are unaffected (still unconditional `*`); a WebSocket upgrade from a foreign Origin is rejected for a trusted-network-authenticated session, including same-origin default-port normalisation. |
+| `test_cors.py` | API/page responses carry no CORS header by default; an unlisted Origin gets nothing; an allow-listed Origin is echoed exactly with `Vary: Origin`; static assets are unaffected (still unconditional `*`); a WebSocket upgrade from a foreign Origin is rejected for a trusted-network-authenticated session, including same-origin default-port normalisation. The policy is runtime-switchable via `cWebem::SetCorsPolicy()`: a `*` entry echoes any Origin (never a literal `*`), `cors_allow_trusted_networks` echoes IP-literal origins inside trusted ranges (hostnames never resolved), and both apply to WebSocket upgrades too. |
 | `test_ws_write_race.py` | `WS_Write()` called from an independent application thread while the io thread is tearing a connection down (client RST) does not crash or hang the server under sustained load. This is a stress test, not a proof — MSVC has no ThreadSanitizer, so a clean run demonstrates survival under load, not the absence of a data race. |
 | `test_tls_handshake_timeout.py` | A client that completes the TCP handshake but never sends a TLS ClientHello is dropped near the configured `tls_handshake_timeout` instead of being held open indefinitely (previously bounded only by the 20-minute abandoned-connection timeout). Needs `openssl` at configure time to generate a throwaway self-signed certificate; see below. |
 
@@ -63,7 +63,7 @@ itself only checks the process exit code, not the count:
 | `test_accept_resilience.py` | 6 |
 | `test_auth_hardening.py` | 13 |
 | `test_download_leak.py` | 12 |
-| `test_cors.py` | 13 |
+| `test_cors.py` | 23 |
 | `test_ws_write_race.py` | 7 |
 | `test_tls_handshake_timeout.py` | 7 |
 

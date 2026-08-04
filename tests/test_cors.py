@@ -17,7 +17,11 @@ visited read that response. This test proves:
   - a WebSocket upgrade from a foreign Origin is rejected for a trusted-network
     session, while a same-origin or allow-listed upgrade is accepted;
   - the same-origin check normalises the scheme's default port, so it matches
-    whether the Host header elides ":80" or spells it out explicitly.
+    whether the Host header elides ":80" or spells it out explicitly;
+  - the policy is runtime-switchable via cWebem::SetCorsPolicy(): a "*" entry
+    echoes any Origin (never a literal "*"), cors_allow_trusted_networks echoes
+    IP-literal origins inside trusted ranges (hostnames never resolved), and
+    tightening the policy again takes effect immediately.
 
 Usage:
     python test_cors.py <path-to-test_cors_server[.exe]>
@@ -232,6 +236,51 @@ def main():
         status = ws_handshake_status(p, "/ws/echo", "http://example.com", host_header="example.com:80")
         check(status.startswith("HTTP/1.1 101"),
               "explicit ':80' Host still matches Origin with the port elided (status=%r)" % status)
+
+        # ---- runtime policy switches (cWebem::SetCorsPolicy) ----------------
+
+        def set_policy(origins, trusted):
+            s, _ = http_get(p, "/setcors.htm?origins=%s&trusted=%d" % (origins, trusted))
+            if not s.startswith("HTTP/1.1 200"):
+                raise RuntimeError("setcors failed: %r" % s)
+
+        print("\n['*' opt-out] a single '*' entry echoes ANY Origin (never a literal '*')")
+        set_policy("*", 0)
+        status, headers = http_get(p, api_path, origin="https://evil.com")
+        check(headers.get("access-control-allow-origin") == "https://evil.com",
+              "'*' policy echoes the request Origin exactly (got %r)" % headers.get("access-control-allow-origin"))
+        check(headers.get("vary") == "Origin",
+              "'*' policy still sends Vary: Origin (got %r)" % headers.get("vary"))
+        status = ws_handshake_status(p, "/ws/echo", "https://evil.com")
+        check(status.startswith("HTTP/1.1 101"),
+              "'*' policy also admits the cross-origin WebSocket upgrade (status=%r)" % status)
+
+        print("\n[trusted-network origins] IP-literal origin inside a trusted range is echoed")
+        set_policy("", 1)
+        status, headers = http_get(p, api_path, origin="http://127.0.0.1:8082")
+        check(headers.get("access-control-allow-origin") == "http://127.0.0.1:8082",
+              "origin with a trusted-range IP host is echoed (got %r)" % headers.get("access-control-allow-origin"))
+        check(headers.get("vary") == "Origin",
+              "trusted-network echo sends Vary: Origin (got %r)" % headers.get("vary"))
+        status, headers = http_get(p, api_path, origin="http://192.168.1.5:8082")
+        check("access-control-allow-origin" not in headers,
+              "IP origin outside the trusted ranges gets no CORS header")
+        status, headers = http_get(p, api_path, origin="http://localhost:8082")
+        check("access-control-allow-origin" not in headers,
+              "hostname origin is never resolved against trusted ranges, so no CORS header")
+        status = ws_handshake_status(p, "/ws/echo", "http://127.0.0.1:8082",
+                                     host_header="127.0.0.1:%d" % p)
+        check(status.startswith("HTTP/1.1 101"),
+              "trusted-range origin also admits the WebSocket upgrade (status=%r)" % status)
+
+        print("\n[policy restore] tightening the policy again takes effect immediately")
+        set_policy("https://allowed.example.com", 0)
+        status, headers = http_get(p, api_path, origin="https://evil.com")
+        check("access-control-allow-origin" not in headers,
+              "after restore, an unlisted Origin gets no CORS header again")
+        status, headers = http_get(p, api_path, origin="https://allowed.example.com")
+        check(headers.get("access-control-allow-origin") == "https://allowed.example.com",
+              "after restore, the listed Origin is still echoed (got %r)" % headers.get("access-control-allow-origin"))
 
     print("\n%d checks, %d failure(s)" % (CHECKS, FAILURES))
     return 0 if FAILURES == 0 else 1

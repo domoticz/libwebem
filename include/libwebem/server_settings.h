@@ -78,6 +78,7 @@ public:
 			", server_name='" + server_name + "'" +
 			", allowed_hosts_count=" + std::to_string(allowed_hosts.size()) +
 			", allowed_cors_origins_count=" + std::to_string(allowed_cors_origins.size()) +
+			", cors_allow_trusted_networks=" + (cors_allow_trusted_networks ? "true" : "false") +
 			", max_connections=" + std::to_string(max_connections) +
 			", max_connections_per_ip=" + std::to_string(max_connections_per_ip) +
 			", trusted_proxy_addresses_count=" + std::to_string(trusted_proxy_addresses.size()) +
@@ -185,7 +186,33 @@ public:
 	/// on the trusted network -- do not add an origin here unless you deliberately
 	/// intend a separate site to be able to call this API from client-side
 	/// JavaScript.
+	///
+	/// A single "*" entry is an explicit opt-out of origin checking: the request's
+	/// Origin is then echoed back whatever it is (still never a literal "*", so
+	/// responses stay per-origin cacheable via "Vary: Origin"). This restores the
+	/// pre-hardening allow-everything behaviour and with it the exposure described
+	/// above -- ANY website open in a browser on a trusted network can then read
+	/// and drive the API. Hosts that surface this setting to end users should warn
+	/// loudly before accepting it.
 	std::vector<std::string> allowed_cors_origins;
+
+	/// When true, an Origin whose host is an IP literal that falls inside a range
+	/// registered via AddTrustedNetworks() is also echoed back (with "Vary:
+	/// Origin"), even if it is not listed in allowed_cors_origins. This lets a
+	/// dashboard served from another port or machine INSIDE the trusted network
+	/// call the API cross-origin without the operator having to enumerate every
+	/// origin, while origins from anywhere else still get no CORS headers.
+	///
+	/// Hostname origins are deliberately NOT resolved for this check (DNS lookups
+	/// on the request path, and a rebinding-shaped trust decision, are both
+	/// unacceptable) -- only IP-literal origins can match; hostname origins must
+	/// be listed explicitly in allowed_cors_origins.
+	///
+	/// OFF BY DEFAULT. Enabling it means every web server on the trusted network
+	/// -- including, say, a compromised IoT device's admin page -- can serve a
+	/// page that reads and drives this API through the browser of anyone on that
+	/// network, with the no-credential admin rights trusted networks confer.
+	bool cors_allow_trusted_networks{ false };
 
 	/// Which proxy-forwarded-client-address header family libwebem is allowed to
 	/// trust for AreWeInTrustedNetwork() / session.remote_host resolution.

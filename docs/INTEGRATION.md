@@ -328,15 +328,29 @@ settings.allowed_cors_origins.push_back("https://dashboard.example.com");
 ```
 
 Only an exact match of the request's `Origin` header is echoed back (with `Vary:
-Origin`); nothing is ever echoed unvalidated, and there is no wildcard option here.
-**Adding an origin here grants that site the same trusted-network rights that any
-browser on the trusted network already has** — treat this list with the same care as
-`AddTrustedNetworks()`.
+Origin`); nothing is ever echoed unvalidated. **Adding an origin here grants that
+site the same trusted-network rights that any browser on the trusted network already
+has** — treat this list with the same care as `AddTrustedNetworks()`.
 
-The same allow-list gates WebSocket upgrades: a same-origin upgrade (Origin matching
+Two deliberate opt-outs exist beyond exact origins, both off by default (see the
+field comments in `server_settings.h` for the exposure each one accepts):
+
+- a single `"*"` entry in `allowed_cors_origins` echoes **any** Origin (still never
+  a literal `*`, so responses stay per-origin cacheable) — the pre-hardening
+  behaviour, restored only by explicit choice;
+- `cors_allow_trusted_networks` echoes an Origin whose host is an IP literal inside
+  an `AddTrustedNetworks()` range — for dashboards served from another port or
+  machine inside the trusted network. Hostname origins are never resolved for this
+  check; list those explicitly.
+
+The whole policy can be replaced at runtime with
+`cWebem::SetCorsPolicy(origins, allowTrustedNetworks)`, e.g. from a settings page,
+without restarting the server.
+
+The same policy gates WebSocket upgrades: a same-origin upgrade (Origin matching
 this server's own scheme+host) is always allowed, but a cross-origin upgrade is only
-accepted for a trusted-network-authenticated session when its Origin is in
-`allowed_cors_origins`. Cookie-authenticated upgrades don't need this check —
+accepted for a trusted-network-authenticated session when its Origin passes
+`IsCorsOriginAllowed()`. Cookie-authenticated upgrades don't need this check —
 `SameSite=strict` already keeps a foreign site's browser from attaching the session
 cookie in the first place.
 

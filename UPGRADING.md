@@ -78,6 +78,22 @@ an entry in `allowed_cors_origins`, and adds `Vary: Origin` when it does.
 unless you configure it. If you relied on the wildcard, that is the setting to
 populate — and worth re-examining before you do.
 
+Hosting applications that surface this to end users have three knobs, all
+runtime-switchable via `cWebem::SetCorsPolicy(origins, allowTrustedNetworks)`
+(no restart; in-flight requests see either the old or the new policy, never a
+mix):
+
+- exact origins in `allowed_cors_origins`;
+- a single `"*"` entry in that list as an explicit allow-any opt-out (the
+  request's Origin is echoed, never a literal `*`);
+- `cors_allow_trusted_networks`, which echoes Origins whose host is an
+  IP literal inside an `AddTrustedNetworks()` range (hostnames are never
+  resolved). See the field comments in `server_settings.h` for the risk each
+  one carries.
+
+The same policy also admits cookie-less WebSocket upgrade origins (see
+"WebSocket upgrades are authenticated when users exist" below).
+
 ---
 
 ### Source-compatible, but worth acting on

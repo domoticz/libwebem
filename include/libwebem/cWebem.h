@@ -240,6 +240,30 @@ namespace http
 			std::vector<_tWebUserPassword> m_userpasswords;
 			void AddTrustedNetworks(const std::string &network);
 			void ClearTrustedNetworks();
+			/// True when the given host is an IP literal (IPv4 or IPv6, brackets
+			/// allowed) that falls inside a range registered via
+			/// AddTrustedNetworks(). Hostnames are never resolved; they simply
+			/// return false. Snapshots the network list under m_configMutex, so it
+			/// must not be called with that lock already held.
+			bool IsHostInTrustedNetworks(const std::string &sHost);
+			/// The configured CORS policy as a single decision: true when the given
+			/// Origin is explicitly listed in allowed_cors_origins, when that list
+			/// contains the "*" opt-out entry, or when cors_allow_trusted_networks
+			/// is set and the Origin's host is an IP literal inside a trusted
+			/// network range. Consulted for HTTP CORS headers (ApplyCorsHeaders)
+			/// and for cookie-less WebSocket upgrade origins alike. Reads the
+			/// policy under m_configMutex so it is safe against a concurrent
+			/// SetCorsPolicy().
+			bool IsCorsOriginAllowed(const std::string &origin);
+			/// Apply the configured CORS policy to a response: echo the request's
+			/// Origin (plus "Vary: Origin") when IsCorsOriginAllowed() accepts it,
+			/// otherwise add no CORS headers at all. See server_settings for the
+			/// security implications of each knob.
+			void ApplyCorsHeaders(reply &rep, const request &req);
+			/// Replace the CORS policy at runtime (no server restart), e.g. when
+			/// the hosting application saves new settings. Thread-safe against
+			/// in-flight requests: ApplyCorsHeaders snapshots under the same lock.
+			void SetCorsPolicy(const std::vector<std::string> &origins, bool bAllowTrustedNetworks);
 			std::vector<_tIPNetwork> m_localnetworks;
 			void SetDigistRealm(const std::string &realm);
 			std::string m_DigistRealm;
