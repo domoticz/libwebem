@@ -2873,7 +2873,7 @@ namespace http {
 			if (GetURICommandParameter(req.uri, cmdparam))
 			{
 				for (const auto &cmd : whitelistCommands)
-					if (cmdparam.find(cmd) == 0)
+					if (cmdparam == cmd)
 						return true;
 			}
 
