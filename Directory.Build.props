@@ -1,0 +1,10 @@
+<Project>
+  <!-- Release|Win32 is the GitHub CI configuration: no vcpkg there, so boost and the
+       other third party headers come from the downloaded WindowsLibraries package.
+       All other configurations use the vcpkg installation on the developer machine. -->
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\..\msbuild\Windows Libraries\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>
