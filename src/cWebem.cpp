@@ -644,41 +644,37 @@ namespace http {
 				std::string name;
 				std::string value;
 
-				size_t q = 0;
-				size_t p = q;
-				int flag_done = 0;
-				const std::string& uri = params;
-				while (!flag_done)
+				size_t p = 0;
+				while (p <= params.size())
 				{
-					q = uri.find('=', p);
-					if (q == std::string::npos)
+					// Split on '&' first, then on the first '=' inside the segment. The old
+					// order (find '=' first) let a segment with no '=' swallow the next
+					// pair's name, so the query the auth-bypass whitelist scanned and the
+					// query the command dispatcher parsed could disagree (CVE parser
+					// differential). A bare segment is now a name with an empty value.
+					size_t amp = params.find('&', p);
+					std::string segment = (amp == std::string::npos) ? params.substr(p) : params.substr(p, amp - p);
+					if (!segment.empty())
 					{
+						size_t eq = segment.find('=');
+						name = (eq == std::string::npos) ? segment : segment.substr(0, eq);
+						value = (eq == std::string::npos) ? std::string() : segment.substr(eq + 1);
+						// the browser sends blanks as +
+						while (true)
+						{
+							size_t plus = value.find('+');
+							if (plus == std::string::npos)
+								break;
+							value.replace(plus, 1, " ");
+						}
+						// now, url-decode only the value
+						std::string decoded;
+						request_handler::url_decode(value, decoded);
+						req.parameters.insert(std::pair< std::string, std::string >(name, decoded));
+					}
+					if (amp == std::string::npos)
 						break;
-					}
-					name = uri.substr(p, q - p);
-					p = q + 1;
-					q = uri.find('&', p);
-					if (q != std::string::npos)
-						value = uri.substr(p, q - p);
-					else
-					{
-						value = uri.substr(p);
-						flag_done = 1;
-					}
-					// the browser sends blanks as +
-					while (true)
-					{
-						size_t p = value.find('+');
-						if (p == std::string::npos)
-							break;
-						value.replace(p, 1, " ");
-					}
-
-					// now, url-decode only the value
-					std::string decoded;
-					request_handler::url_decode(value, decoded);
-					req.parameters.insert(std::pair< std::string, std::string >(name, decoded));
-					p = q + 1;
+					p = amp + 1;
 				}
 			}
 			else if ((strstr(pContent_Type, "text/plain") != nullptr) || (strstr(pContent_Type, "application/json") != nullptr) ||
@@ -826,41 +822,37 @@ namespace http {
 				std::string name;
 				std::string value;
 
-				size_t q = 0;
-				size_t p = q;
-				int flag_done = 0;
-				const std::string &uri = params;
-				while (!flag_done)
+				size_t p = 0;
+				while (p <= params.size())
 				{
-					q = uri.find('=', p);
-					if (q == std::string::npos)
+					// Split on '&' first, then on the first '=' inside the segment. The old
+					// order (find '=' first) let a segment with no '=' swallow the next
+					// pair's name, so the query the auth-bypass whitelist scanned and the
+					// query the command dispatcher parsed could disagree (CVE parser
+					// differential). A bare segment is now a name with an empty value.
+					size_t amp = params.find('&', p);
+					std::string segment = (amp == std::string::npos) ? params.substr(p) : params.substr(p, amp - p);
+					if (!segment.empty())
 					{
+						size_t eq = segment.find('=');
+						name = (eq == std::string::npos) ? segment : segment.substr(0, eq);
+						value = (eq == std::string::npos) ? std::string() : segment.substr(eq + 1);
+						// the browser sends blanks as +
+						while (true)
+						{
+							size_t plus = value.find('+');
+							if (plus == std::string::npos)
+								break;
+							value.replace(plus, 1, " ");
+						}
+						// now, url-decode only the value
+						std::string decoded;
+						request_handler::url_decode(value, decoded);
+						req.parameters.insert(std::pair< std::string, std::string >(name, decoded));
+					}
+					if (amp == std::string::npos)
 						break;
-					}
-					name = uri.substr(p, q - p);
-					p = q + 1;
-					q = uri.find('&', p);
-					if (q != std::string::npos)
-						value = uri.substr(p, q - p);
-					else
-					{
-						value = uri.substr(p);
-						flag_done = 1;
-					}
-					// the browser sends blanks as +
-					while (true)
-					{
-						size_t p = value.find('+');
-						if (p == std::string::npos)
-							break;
-						value.replace(p, 1, " ");
-					}
-
-					// now, url-decode only the value
-					std::string decoded;
-					request_handler::url_decode(value, decoded);
-					req.parameters.insert(std::pair< std::string, std::string >(name, decoded));
-					p = q + 1;
+					p = amp + 1;
 				}
 			}
 			if (req.method == "POST")
