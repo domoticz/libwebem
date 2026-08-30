@@ -1516,7 +1516,11 @@ namespace http {
 		/// stop connection on abandoned timeout
 		void connection::handle_abandoned_timeout(const boost::system::error_code& error) {
 			if (error != boost::asio::error::operation_aborted) {
-				if (m_logger) m_logger->Log(LogLevel::Status, "%s -> handle abandoned timeout (status=%d)", host_remote_endpoint_address_.c_str(), status_);
+				// Debug, not Status: this fires routinely when a client (tablets/phones
+				// dropping Wi-Fi, browsers discarding background tabs) leaves a
+				// connection behind without a clean teardown. The timer reaping it is
+				// normal housekeeping, not something an operator needs to see per event.
+				if (m_logger) m_logger->Debug(DebugCategory::WebServer, "%s -> handle abandoned timeout (status=%d)", host_remote_endpoint_address_.c_str(), status_);
 				connection_manager_.stop(shared_from_this());
 			}
 		}
