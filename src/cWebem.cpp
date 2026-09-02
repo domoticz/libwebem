@@ -172,7 +172,15 @@ namespace http {
 		{
 			// associate handler to timer and schedule the first iteration
 			m_session_clean_timer.async_wait([this](auto &&) { CleanSessions(); });
-			m_io_context_thread = std::make_shared<std::thread>([p = &m_io_context] { p->run(); });
+			m_io_context_thread = std::make_shared<std::thread>([this, p = &m_io_context] {
+				try { p->run(); }
+				catch (std::exception& e) {
+					if (m_logger) m_logger->Log(LogLevel::Error, "[web] session cleaner exception: %s", e.what());
+				}
+				catch (...) {
+					if (m_logger) m_logger->Log(LogLevel::Error, "[web] session cleaner unknown exception");
+				}
+			});
 			utils::set_thread_name(m_io_context_thread->native_handle(), "Webem_ssncleaner");
 		}
 
