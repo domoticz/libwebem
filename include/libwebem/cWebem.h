@@ -177,10 +177,32 @@ namespace http
 
 			bool ExtractPostData(request &req, const char *pContent_Type);
 
+			/// Tokenise a "name=value&name=value" list (a GET query string or an
+			/// x-www-form-urlencoded body) into parameters. Values are url-decoded
+			/// individually (and '+' becomes a blank); names are taken verbatim.
+			/// This is the single parser behind request::parameters -- every
+			/// consumer (page dispatch, the authentication bypass whitelist,
+			/// login/logout detection) must read the parsed set rather than
+			/// searching the raw URI, so that they cannot disagree.
+			static void ParseUrlEncodedParameters(const std::string &encoded, std::multimap<std::string, std::string> &parameters);
+			/// Clear req.parameters and fill it from the query string in req.uri
+			/// plus, when bIncludeBody is set, a POST body (ParseRequestBody).
+			/// Returns false when the POST body could not be parsed, including
+			/// an unrecognised Content-Type.
+			bool ParseRequestParameters(request &req, bool bIncludeBody = true);
+			/// Append the parameters carried in a POST body (see ExtractPostData)
+			/// to req.parameters. A no-op (returning true) for other methods or a
+			/// POST without a Content-Type; returns false when the body could not
+			/// be parsed, including an unrecognised Content-Type.
+			bool ParseRequestBody(request &req);
+
 			bool IsAction(const request &req);
 			bool CheckForAction(WebEmSession &session, request &req);
 
 			bool IsPageOverride(const request &req, reply &rep);
+			/// Parse the request parameters (ParseRequestParameters) and dispatch
+			/// the registered page handler, if any. Returns false when the request
+			/// path is not a registered page.
 			bool CheckForPageOverride(WebEmSession &session, request &req, reply &rep);
 
 			void SetAuthenticationMethod(_eAuthenticationMethod amethod);
@@ -416,6 +438,12 @@ namespace http
 			/// Registered via RegisterNoCachePattern().
 			std::vector<std::string> m_noCachePatterns;
 		      private:
+			/// Dispatch the registered page handler for req, reading the already
+			/// parsed req.parameters (ParseRequestParameters must have run). Used by
+			/// handle_request so the authentication bypass check and the dispatch
+			/// operate on one and the same parameter set.
+			bool ExecutePageOverride(WebEmSession &session, request &req, reply &rep);
+
 			/// Protects configuration collections (myActions, myPages, myWhitelistURLs,
 			/// myWhitelistCommands, m_noCachePatterns, m_userpasswords) against
 			/// concurrent access from registration and request-handler threads.

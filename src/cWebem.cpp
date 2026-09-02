@@ -565,6 +565,83 @@ namespace http {
 			return is;
 		}
 
+		void cWebem::ParseUrlEncodedParameters(const std::string &encoded, std::multimap<std::string, std::string> &parameters)
+		{
+			// Shared by the GET query string and the x-www-form-urlencoded POST
+			// body. This is the ONLY place a name=value list is turned into
+			// request::parameters, so every consumer (page dispatch, the
+			// authentication bypass whitelist, login/logout detection) sees the
+			// same values. Do not add a second, ad-hoc parser next to it: a raw
+			// substring search over the URI disagrees with this tokeniser the
+			// moment a value contains "?param=" or "&", and that disagreement is
+			// exactly what an authentication bypass is made of.
+			std::string name;
+			std::string value;
+
+			size_t p = 0;
+			while (p <= encoded.size())
+			{
+				// Split on '&' first, then on the first '=' inside the segment. The
+				// old order (find '=' first) let a segment with no '=' swallow the
+				// next pair's name ("&foo&param=logincheck" became a parameter named
+				// "foo&param"), so the query the auth-bypass whitelist scanned and
+				// the query the command dispatcher parsed could disagree. A bare
+				// segment is a name with an empty value.
+				size_t amp = encoded.find('&', p);
+				std::string segment = (amp == std::string::npos) ? encoded.substr(p) : encoded.substr(p, amp - p);
+				if (!segment.empty())
+				{
+					size_t eq = segment.find('=');
+					name = (eq == std::string::npos) ? segment : segment.substr(0, eq);
+					value = (eq == std::string::npos) ? std::string() : segment.substr(eq + 1);
+					// the browser sends blanks as +
+					while (true)
+					{
+						size_t plus = value.find('+');
+						if (plus == std::string::npos)
+							break;
+						value.replace(plus, 1, " ");
+					}
+					// now, url-decode only the value
+					std::string decoded;
+					request_handler::url_decode(value, decoded);
+					parameters.insert(std::pair< std::string, std::string >(name, decoded));
+				}
+				if (amp == std::string::npos)
+					break;
+				p = amp + 1;
+			}
+		}
+
+		bool cWebem::ParseRequestParameters(request &req, bool bIncludeBody)
+		{
+			req.parameters.clear();
+
+			// The raw request string is parsed (not the decoded path): every value
+			// is url-decoded individually below, so a "%26" inside a value stays
+			// part of that value instead of becoming a separator.
+			size_t paramPos = req.uri.find_first_of('?');
+			if (paramPos != std::string::npos)
+			{
+				ParseUrlEncodedParameters(req.uri.substr(paramPos + 1), req.parameters);
+			}
+
+			if (bIncludeBody)
+				return ParseRequestBody(req);
+			return true;
+		}
+
+		bool cWebem::ParseRequestBody(request &req)
+		{
+			if (req.method != "POST")
+				return true;
+			const char *pContent_Type = request::get_req_header(&req, "Content-Type");
+			if (pContent_Type == nullptr)
+				return true;
+			// Extract the POST data into the parameters
+			return ExtractPostData(req, pContent_Type);
+		}
+
 		bool cWebem::ExtractPostData(request &req, const char *pContent_Type)
 		{
 			if (strstr(pContent_Type, "multipart/form-data") != nullptr)
@@ -648,42 +725,7 @@ namespace http {
 			}
 			else if (strstr(pContent_Type, "application/x-www-form-urlencoded") != nullptr)
 			{
-				std::string params = req.content;
-				std::string name;
-				std::string value;
-
-				size_t p = 0;
-				while (p <= params.size())
-				{
-					// Split on '&' first, then on the first '=' inside the segment. The old
-					// order (find '=' first) let a segment with no '=' swallow the next
-					// pair's name, so the query the auth-bypass whitelist scanned and the
-					// query the command dispatcher parsed could disagree (CVE parser
-					// differential). A bare segment is now a name with an empty value.
-					size_t amp = params.find('&', p);
-					std::string segment = (amp == std::string::npos) ? params.substr(p) : params.substr(p, amp - p);
-					if (!segment.empty())
-					{
-						size_t eq = segment.find('=');
-						name = (eq == std::string::npos) ? segment : segment.substr(0, eq);
-						value = (eq == std::string::npos) ? std::string() : segment.substr(eq + 1);
-						// the browser sends blanks as +
-						while (true)
-						{
-							size_t plus = value.find('+');
-							if (plus == std::string::npos)
-								break;
-							value.replace(plus, 1, " ");
-						}
-						// now, url-decode only the value
-						std::string decoded;
-						request_handler::url_decode(value, decoded);
-						req.parameters.insert(std::pair< std::string, std::string >(name, decoded));
-					}
-					if (amp == std::string::npos)
-						break;
-					p = amp + 1;
-				}
+				ParseUrlEncodedParameters(req.content, req.parameters);
 			}
 			else if ((strstr(pContent_Type, "text/plain") != nullptr) || (strstr(pContent_Type, "application/json") != nullptr) ||
 				(strstr(pContent_Type, "application/xml") != nullptr))
@@ -816,62 +858,19 @@ namespace http {
 
 		bool cWebem::CheckForPageOverride(WebEmSession & session, request& req, reply& rep)
 		{
+			ParseRequestParameters(req);
+			return ExecutePageOverride(session, req, rep);
+		}
+
+		bool cWebem::ExecutePageOverride(WebEmSession & session, request& req, reply& rep)
+		{
+			// req.parameters must already hold the parsed query string / POST body
+			// (see ParseRequestParameters). handle_request parses once, up front,
+			// so that the authentication bypass decision and the page dispatch are
+			// taken on the very same parameter set.
 			std::string request_path;
 			request_handler::url_decode(req.uri, request_path);
 			request_path = ExtractRequestPath(request_path);
-
-			req.parameters.clear();
-
-			std::string request_path2 = req.uri; // we need the raw request string to parse the get-request
-			size_t paramPos = request_path2.find_first_of('?');
-			if (paramPos != std::string::npos)
-			{
-				std::string params = request_path2.substr(paramPos + 1);
-				std::string name;
-				std::string value;
-
-				size_t p = 0;
-				while (p <= params.size())
-				{
-					// Split on '&' first, then on the first '=' inside the segment. The old
-					// order (find '=' first) let a segment with no '=' swallow the next
-					// pair's name, so the query the auth-bypass whitelist scanned and the
-					// query the command dispatcher parsed could disagree (CVE parser
-					// differential). A bare segment is now a name with an empty value.
-					size_t amp = params.find('&', p);
-					std::string segment = (amp == std::string::npos) ? params.substr(p) : params.substr(p, amp - p);
-					if (!segment.empty())
-					{
-						size_t eq = segment.find('=');
-						name = (eq == std::string::npos) ? segment : segment.substr(0, eq);
-						value = (eq == std::string::npos) ? std::string() : segment.substr(eq + 1);
-						// the browser sends blanks as +
-						while (true)
-						{
-							size_t plus = value.find('+');
-							if (plus == std::string::npos)
-								break;
-							value.replace(plus, 1, " ");
-						}
-						// now, url-decode only the value
-						std::string decoded;
-						request_handler::url_decode(value, decoded);
-						req.parameters.insert(std::pair< std::string, std::string >(name, decoded));
-					}
-					if (amp == std::string::npos)
-						break;
-					p = amp + 1;
-				}
-			}
-			if (req.method == "POST")
-			{
-				const char *pContent_Type = request::get_req_header(&req, "Content-Type");
-				if (pContent_Type)
-				{
-					// Extract the POST data into the parameters
-					bool bExtracted = ExtractPostData(req, pContent_Type);
-				}
-			}
 
 			// Determine the file extension.
 			std::string extension;
@@ -2826,35 +2825,6 @@ namespace http {
 			return true;
 		}
 
-		static bool GetURICommandParameter(const std::string &uri, std::string &cmdparam)
-		{
-			if (uri.find("type=command") == std::string::npos)
-				return false;
-			size_t ppos1 = uri.find("&param=");
-			size_t ppos2 = uri.find("?param=");
-			if (
-				(ppos1 == std::string::npos) &&
-				(ppos2 == std::string::npos)
-				)
-				return false;
-			cmdparam = uri;
-			size_t ppos = ppos1;
-			if (ppos == std::string::npos)
-				ppos = ppos2;
-			else
-			{
-				if ((ppos2 < ppos) && (ppos != std::string::npos))
-					ppos = ppos2;
-			}
-			cmdparam = uri.substr(ppos + 7);
-			ppos = cmdparam.find('&');
-			if (ppos != std::string::npos)
-			{
-				cmdparam = cmdparam.substr(0, ppos);
-			}
-			return true;
-		}
-
 		bool cWebemRequestHandler::CheckAuthByPass(const request& req)
 		{
 			//Check if we need to bypass authentication for this request (URL or command)
@@ -2869,15 +2839,40 @@ namespace http {
 				if (req.uri.find(url) == 0)
 					return true;
 
-			std::string cmdparam;
-			if (GetURICommandParameter(req.uri, cmdparam))
-			{
-				for (const auto &cmd : whitelistCommands)
-					if (cmdparam == cmd)
-						return true;
-			}
+			// The command whitelist is judged on req.parameters -- the same parsed
+			// set the page handler dispatches on -- never on a substring search
+			// of the raw URI. A raw search finds "?param=logincheck" inside the
+			// VALUE of an unrelated parameter ("?foo=?param=logincheck&type=
+			// command&param=getsettings") while the tokeniser hands the
+			// dispatcher param=getsettings, and any such disagreement lets an
+			// unauthenticated caller run a non-whitelisted command.
+			//
+			// Every "param" value present must be whitelisted, not just whichever
+			// duplicate std::multimap::find happens to return: the bypass is
+			// granted for the request as a whole, so a request that also names a
+			// command outside the whitelist must not receive it.
+			if (request::findValue(&req, "type") != "command")
+				return false;
 
-			return false;
+			auto range = req.parameters.equal_range("param");
+			if (range.first == range.second)
+				return false;
+
+			for (auto it = range.first; it != range.second; ++it)
+			{
+				bool bWhitelisted = false;
+				for (const auto &cmd : whitelistCommands)
+				{
+					if (it->second == cmd)
+					{
+						bWhitelisted = true;
+						break;
+					}
+				}
+				if (!bWhitelisted)
+					return false;
+			}
+			return true;
 		}
 
 		bool cWebemRequestHandler::AllowBasicAuth()
@@ -3266,9 +3261,28 @@ namespace http {
 			bool isPage = myWebem->IsPageOverride(req, rep);
 			bool isAction = myWebem->IsAction(req);		// This is used but will be removed in the future and replaced by the JSON API commands
 
+			// The request is copied so its parameters attribute can be filled. For
+			// a page request the query string is parsed here, ONCE, before any
+			// decision is taken on it: the login/logout detection below, the
+			// authentication bypass whitelist (CheckAuthByPass) and the page
+			// dispatch (ExecutePageOverride) all read the same
+			// requestCopy.parameters, so they cannot disagree about which
+			// command a request names.
+			//
+			// A POST body is deliberately NOT parsed yet: that work (the multipart
+			// parser in particular) must stay behind authentication so an
+			// unauthenticated client cannot make the io thread chew through a
+			// 100 MB upload. It is appended after step 11, and a request that
+			// was admitted on the whitelist alone is then re-checked against the
+			// completed set before it is dispatched.
+			request requestCopy = req;
+			if (isPage)
+				myWebem->ParseRequestParameters(requestCopy, /*bIncludeBody=*/false);
+
 			bool isAPI = (isPage && (req.uri.find("/json.htm?") != std::string::npos));
-			bool isLogout = (isAPI && (req.uri.find("param=dologout") != std::string::npos));
-			bool isLogin = (isAPI && (req.uri.find("param=logincheck") != std::string::npos || req.uri.find("param=passkeylogin-complete") != std::string::npos));
+			const std::string apiParam = isAPI ? request::findValue(&requestCopy, "param") : std::string();
+			bool isLogout = (isAPI && (apiParam == "dologout"));
+			bool isLogin = (isAPI && (apiParam == "logincheck" || apiParam == "passkeylogin-complete"));
 
 			// 7) If the LogOut API is called, we will remove the session and the cookie
 			if (isLogout)
@@ -3295,7 +3309,7 @@ namespace http {
 			bool isUpgradeRequest = is_upgrade_request(session, req, rep);
 
 			// 9) Check if the request needs to be authenticated, for pages (and actions) and WebSocket upgrades
-			bool needsAuthentication = ((isPage || isUpgradeRequest) ? !CheckAuthByPass(req) : false);
+			bool needsAuthentication = ((isPage || isUpgradeRequest) ? !CheckAuthByPass(requestCopy) : false);
 
 			// An application with no users configured has no authentication to
 			// enforce: every page and command is already served to anyone who
@@ -3344,8 +3358,26 @@ namespace http {
 				return;
 			}
 
-			// Copy the request to be able to fill its parameters attribute
-			request requestCopy = req;
+			// 11b) Now that the caller is either authenticated or admitted on the
+			// whitelist, complete the parameter set with the POST body. A request
+			// that got here on the whitelist alone is judged again on the
+			// completed set: the body may add "param" values, and the dispatch
+			// must never run a command the bypass was not granted for.
+			if (isPage)
+			{
+				// The parse result is not consulted: a body that fails half-way
+				// may still have appended values, so the re-check below always
+				// runs on whatever the dispatcher is about to see.
+				myWebem->ParseRequestBody(requestCopy);
+				if (!isAuthenticated && !CheckAuthByPass(requestCopy))
+				{
+					if (m_logger) m_logger->Debug(DebugCategory::WebServer, "[web:%s] Whitelisted request names a non-whitelisted command in its body!", myWebem->GetPort().c_str());
+					send_authorization_request(req, rep);
+					if(bUseRealHost)
+						rep.originHost = realHost;
+					return;
+				}
+			}
 
 			// 12a) Run action if exists. NOTE: This is used but will be removed in the future and replaced by the JSON API commands.
 			bool bHandledAction = false;
@@ -3376,7 +3408,10 @@ namespace http {
 			// 12b) If it wasn't an action (removed soon), it is either a page or a resource request
 			if (!bHandledAction)
 			{
-				if (myWebem->CheckForPageOverride(session, requestCopy, rep))
+				// requestCopy.parameters were parsed at step 6 for page requests, and the
+				// bypass decision at step 9 was taken on exactly that set. Dispatching on
+				// the same set (rather than re-parsing) is what keeps the two consistent.
+				if (isPage && myWebem->ExecutePageOverride(session, requestCopy, rep))
 				{
 					if (rep.status == reply::status_type::download_file)
 						return;

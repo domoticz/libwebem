@@ -65,6 +65,14 @@ target_link_libraries(test_proxy_trust_server PRIVATE webem Boost::boost)
 add_executable(test_auth_hardening_server test_auth_hardening_server.cpp)
 target_link_libraries(test_auth_hardening_server PRIVATE webem Boost::boost)
 
+# Server used by test_auth_bypass.py. The API command whitelist used to be
+# judged by a raw-URI substring search for "?param=" / "&param=" while the page
+# handler dispatched on the tokenised request::parameters; a whitelisted
+# command name planted inside another parameter's value granted the bypass for
+# a request that then ran a protected command. Both now read the same parsed set.
+add_executable(test_auth_bypass_server test_auth_bypass_server.cpp)
+target_link_libraries(test_auth_bypass_server PRIVATE webem Boost::boost)
+
 # Server used by test_download_leak.py. Every reply::download_file response used
 # to leak connection::send_buffer_ (16 KB) via a unique_ptr::release() instead of
 # ::reset() in handle_write_file -- on completion AND on an aborted transfer.
@@ -131,15 +139,16 @@ if(Python3_Interpreter_FOUND)
     webem_add_python_test(test_proxy_trust        test_proxy_trust.py       test_proxy_trust_server)
     webem_add_python_test(test_accept_resilience  test_accept_resilience.py test_connection_limits_server)
     webem_add_python_test(test_auth_hardening     test_auth_hardening.py    test_auth_hardening_server)
+    webem_add_python_test(test_auth_bypass        test_auth_bypass.py       test_auth_bypass_server)
     webem_add_python_test(test_download_leak      test_download_leak.py     test_download_leak_server)
     webem_add_python_test(test_cors               test_cors.py              test_cors_server)
     webem_add_python_test(test_ws_write_race      test_ws_write_race.py     test_ws_write_race_server)
     webem_add_python_test(test_dns_rebinding             test_dns_rebinding.py             test_dns_rebinding_server)
     webem_add_python_test(test_initial_request_timeout   test_initial_request_timeout.py   test_initial_request_timeout_server)
 else()
-    message(STATUS "webem tests: Python 3 interpreter not found -- the 9 Python-driven "
+    message(STATUS "webem tests: Python 3 interpreter not found -- the 10 Python-driven "
                     "integration tests (test_connection_limits, test_proxy_trust, "
-                    "test_accept_resilience, test_auth_hardening, test_download_leak, "
+                    "test_accept_resilience, test_auth_hardening, test_auth_bypass, test_download_leak, "
                     "test_cors, test_ws_write_race, test_dns_rebinding, "
                     "test_initial_request_timeout) will not be registered with ctest. "
                     "Install Python 3 and re-run cmake to enable them.")

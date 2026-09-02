@@ -17,7 +17,7 @@ This directory holds two kinds of tests:
 
 | Suite | What it proves |
 |---|---|
-| `webem_tests` | Secure token generation, constant-time comparison, SHA-256/MD5 hashing, control-character/NUL-injection rejection in paths and URL decoding, strict `Content-Length` parsing, WebSocket frame bounds checks, connection resource limits (global/per-address caps, defaults), proxy header trust (`X-Forwarded-For`/`Forwarded` resolution and filtering). |
+| `webem_tests` | Secure token generation, constant-time comparison, SHA-256/MD5 hashing, control-character/NUL-injection rejection in paths and URL decoding, strict `Content-Length` parsing, WebSocket frame bounds checks, connection resource limits (global/per-address caps, defaults), proxy header trust (`X-Forwarded-For`/`Forwarded` resolution and filtering), and that the single query-string/form-body tokeniser behind `request::parameters` gives the authentication bypass check and the page dispatch the same view of `type`/`param` (decoy `?param=` inside a value, encoded separators, duplicates, query + POST body merge). |
 | `webem_test_http_framing` | `Content-Length` is honoured for every HTTP method (not just POST), so a declared body can't be left in the buffer to be reparsed as a smuggled second request; `Transfer-Encoding` is rejected; disagreeing duplicate `Content-Length` headers are rejected; pipelined requests are parsed correctly and in order; request-line/header-count/header-size/total-size limits reject oversized input; incremental parsing across many small chunks consumes each byte exactly once (no re-walking from byte 0). |
 | `webem_test_session_lifetime` | Sessions are handed out by value, never by pointer into the locked map (no use-after-free under concurrent read/renew/clear); `TouchSessionExpiry`'s renewal thresholds; the per-instance, locked, size-capped remote-client tracking map (bounded inline, not only after a periodic sweep, and evicted oldest-by-last-seen rather than by map key). |
 | `webem_test_hash_and_reply` | `request::print()` returns each request's own parameters rather than a cached first result; `ConstantTimeEquals` never treats two empty inputs as equal; hash functions match known vectors; `reply::set_content_from_file` succeeds on a real file and fails cleanly (no throw) on a missing one. |
@@ -26,6 +26,7 @@ This directory holds two kinds of tests:
 | `test_proxy_trust.py` | The rightmost entry in a forwarded-header chain is trusted, never the leftmost (the client-controlled end); a forged loopback/link-local/unspecified address is filtered out of the chain rather than falling back to the trusted proxy's own address; private-range addresses are not filtered (they're legitimate LAN clients); `Forwarded:` header parsing handles RFC 7239 forms including the `for=` precedence case. |
 | `test_accept_resilience.py` | The accept loop keeps re-arming itself after accept-time errors (a connection reset before accept, or exceeding the connection cap) instead of silently dying and leaving the listener unreachable until a restart. |
 | `test_auth_hardening.py` | A malformed `Authorization` header (too few JWT segments, non-JSON payload, an empty `"aud"` array) is rejected without taking the server thread down or hitting undefined behaviour; a validly signed token still authenticates; a wrong signature is rejected. |
+| `test_auth_bypass.py` | The API command whitelist (`RegisterWhitelistCommandsString`) is judged on the same parsed `request::parameters` the page handler dispatches on, not on a raw-URI substring search: a whitelisted command name planted inside another parameter's value (`?foo=?param=logincheck&type=command&param=getsettings`), url-encoded inside a value, or paired with a protected command as a duplicate `param` (in the URI or the form-encoded POST body) does not grant the bypass; a genuinely whitelisted command still works without credentials, including url-encoded, and a valid Basic login still reaches protected commands. |
 | `test_download_leak.py` | Many completed and aborted `download_file` responses do not grow the server's committed memory (the per-download 16 KB buffer leak); an attachment name containing control characters is rejected as a 500 rather than silently streaming the file with no `Content-Disposition` header. |
 | `test_cors.py` | API/page responses carry no CORS header by default; an unlisted Origin gets nothing; an allow-listed Origin is echoed exactly with `Vary: Origin`; static assets are unaffected (still unconditional `*`); a WebSocket upgrade from a foreign Origin is rejected for a trusted-network-authenticated session, including same-origin default-port normalisation. The policy is runtime-switchable via `cWebem::SetCorsPolicy()`: a `*` entry echoes any Origin (never a literal `*`), `cors_allow_trusted_networks` echoes IP-literal origins inside trusted ranges (hostnames never resolved), and both apply to WebSocket upgrades too. |
 | `test_ws_write_race.py` | `WS_Write()` called from an independent application thread while the io thread is tearing a connection down (client RST) does not crash or hang the server under sustained load. This is a stress test, not a proof — MSVC has no ThreadSanitizer, so a clean run demonstrates survival under load, not the absence of a data race. |
@@ -53,7 +54,7 @@ itself only checks the process exit code, not the count:
 
 | Suite | Checks |
 |---|---|
-| `webem_tests` | 248 |
+| `webem_tests` | 276 |
 | `webem_test_http_framing` | 131 |
 | `webem_test_session_lifetime` | 36 |
 | `webem_test_hash_and_reply` | 26 |
@@ -62,12 +63,13 @@ itself only checks the process exit code, not the count:
 | `test_proxy_trust.py` | 11 |
 | `test_accept_resilience.py` | 6 |
 | `test_auth_hardening.py` | 13 |
+| `test_auth_bypass.py` | 36 |
 | `test_download_leak.py` | 12 |
 | `test_cors.py` | 23 |
 | `test_ws_write_race.py` | 7 |
 | `test_tls_handshake_timeout.py` | 7 |
 
-**556 checks across 13 suites, 0 failures**, on a clean build.
+**630 checks across 14 suites, 0 failures**, on a clean build.
 
 ## Running one suite manually
 
@@ -85,6 +87,7 @@ python tests/test_connection_limits.py  build/tests/test_connection_limits_serve
 python tests/test_proxy_trust.py        build/tests/test_proxy_trust_server
 python tests/test_accept_resilience.py  build/tests/test_connection_limits_server
 python tests/test_auth_hardening.py     build/tests/test_auth_hardening_server
+python tests/test_auth_bypass.py        build/tests/test_auth_bypass_server
 python tests/test_download_leak.py      build/tests/test_download_leak_server
 python tests/test_cors.py               build/tests/test_cors_server
 python tests/test_ws_write_race.py      build/tests/test_ws_write_race_server

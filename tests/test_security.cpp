@@ -1003,6 +1003,114 @@ static void test_allowed_hosts_check()
     }
 }
 
+// The API command whitelist (CheckAuthByPass) and the page dispatch both read
+// request::parameters, and cWebem::ParseUrlEncodedParameters is the one
+// tokeniser that fills it. These pin down the tokeniser's answer for the inputs
+// the old raw-URI substring search got wrong, so any future "quick" search over
+// the URI can be compared against what the dispatcher will actually see.
+static void test_parameter_parsing_consistency()
+{
+    using http::server::cWebem;
+    using http::server::request;
+
+    // The reported bypass: "?param=logincheck" lives inside foo's VALUE. The
+    // dispatcher sees exactly one "param", and it is getsettings.
+    {
+        std::multimap<std::string, std::string> p;
+        cWebem::ParseUrlEncodedParameters("foo=?param=logincheck&type=command&param=getsettings", p);
+        CHECK(p.count("param") == 1);
+        CHECK(request::findValue(&p, "param") == "getsettings");
+        CHECK(request::findValue(&p, "type") == "command");
+        CHECK(request::findValue(&p, "foo") == "?param=logincheck");
+    }
+
+    // A url-encoded separator inside a value stays part of the value: values
+    // are decoded individually, after tokenising.
+    {
+        std::multimap<std::string, std::string> p;
+        cWebem::ParseUrlEncodedParameters("foo=bar%26param%3Dlogincheck&type=command&param=getsettings", p);
+        CHECK(p.count("param") == 1);
+        CHECK(request::findValue(&p, "param") == "getsettings");
+        CHECK(request::findValue(&p, "foo") == "bar&param=logincheck");
+    }
+
+    // Duplicates are all kept (multimap), so a bypass check can insist that
+    // every value is whitelisted rather than trusting whichever one find() returns.
+    {
+        std::multimap<std::string, std::string> p;
+        cWebem::ParseUrlEncodedParameters("type=command&param=logincheck&param=getsettings", p);
+        CHECK(p.count("param") == 2);
+    }
+
+    // The original report (GHSA-gwf6-ff7h-484q): a bare segment must become an
+    // empty-valued parameter, not swallow the next pair's name. Splitting on '='
+    // first turned "&foo&param=logincheck" into a parameter named "foo&param".
+    {
+        std::multimap<std::string, std::string> p;
+        cWebem::ParseUrlEncodedParameters("type=command&foo&param=logincheck&param=getsettings", p);
+        CHECK(p.count("foo") == 1);
+        CHECK(request::findValue(&p, "foo").empty());
+        CHECK(p.count("foo&param") == 0);
+        CHECK(p.count("param") == 2);
+        CHECK(request::findValue(&p, "param") == "logincheck");
+    }
+
+    // Empty segments ("&&", a trailing '&') are skipped, not turned into
+    // empty-named parameters.
+    {
+        std::multimap<std::string, std::string> p;
+        cWebem::ParseUrlEncodedParameters("&&type=command&&param=x&", p);
+        CHECK(p.size() == 2);
+        CHECK(request::findValue(&p, "param") == "x");
+    }
+
+    // '%xx' in a value is decoded and '+' becomes a blank -- the dispatcher
+    // matches on the decoded form, so the bypass must too.
+    {
+        std::multimap<std::string, std::string> p;
+        cWebem::ParseUrlEncodedParameters("param=%6cogincheck&x=a+b", p);
+        CHECK(request::findValue(&p, "param") == "logincheck");
+        CHECK(request::findValue(&p, "x") == "a b");
+    }
+
+    // ParseRequestParameters merges the query string and a form-encoded POST
+    // body into one set (query first), and starts from a clean slate each call.
+    {
+        server_settings s;
+        s.listening_address = "127.0.0.1";
+        s.listening_port = std::to_string(free_tcp_port());
+        cWebem web(s, "./www");
+
+        request req;
+        req.method = "POST";
+        req.uri = "/json.htm?type=command&param=logincheck";
+        req.headers.push_back({"Content-Type", "application/x-www-form-urlencoded"});
+        req.content = "param=getsettings";
+        req.content_length = static_cast<int>(req.content.size());
+        req.parameters.insert({"stale", "value"});
+
+        CHECK(web.ParseRequestParameters(req) == true);
+        CHECK(req.parameters.count("stale") == 0);
+        CHECK(req.parameters.count("param") == 2);
+        CHECK(request::findValue(&req, "type") == "command");
+
+        // handle_request parses the query string alone before authentication
+        // (bIncludeBody=false) and appends the body afterwards (ParseRequestBody).
+        CHECK(web.ParseRequestParameters(req, /*bIncludeBody=*/false) == true);
+        CHECK(req.parameters.count("param") == 1);
+        CHECK(web.ParseRequestBody(req) == true);
+        CHECK(req.parameters.count("param") == 2);
+
+        // A GET carries only its query string, even if content was left behind.
+        req.method = "GET";
+        CHECK(web.ParseRequestParameters(req) == true);
+        CHECK(req.parameters.count("param") == 1);
+        CHECK(request::findValue(&req, "param") == "logincheck");
+
+        web.Stop();
+    }
+}
+
 int main()
 {
     test_secure_token();
@@ -1039,6 +1147,9 @@ int main()
 
     // Host allow-list (DNS-rebinding defence)
     test_allowed_hosts_check();
+
+    // one tokeniser behind request::parameters (auth bypass vs. dispatch)
+    test_parameter_parsing_consistency();
 
     std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
