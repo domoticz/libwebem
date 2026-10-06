@@ -138,6 +138,46 @@ server.RegisterActionCode("/action/save",
     });
 ```
 
+#### Answering with a file from disk (downloads)
+
+A page handler that answers with a file, such as a database backup or a
+recording, should not read it into `rep.content`. Call
+`reply::set_download_file()` instead and libwebem streams the file:
+
+```cpp
+server.RegisterPageCode("/backup.db",
+    [](http::server::WebEmSession& session,
+       const http::server::request& req,
+       http::server::reply& rep)
+    {
+        if (session.rights != http::server::URIGHTS_ADMIN)
+        {
+            rep = http::server::reply::stock_reply(http::server::reply::forbidden);
+            return;
+        }
+        // Path on disk, the name the browser saves it as, and an optional
+        // Content-Type (default: derived from the extension of the path).
+        if (!http::server::reply::set_download_file(&rep, "/var/lib/app/backup.db",
+                                                    "backup.db", "application/octet-stream"))
+            rep = http::server::reply::stock_reply(http::server::reply::internal_server_error);
+    });
+```
+
+- The file is read and written in 256 KB chunks, one at a time, so a download
+  of any size costs one open file and one 256 KB buffer, over HTTP and HTTPS.
+- `Content-Length` is the file size when the transfer starts. A file that is
+  still being written is sent up to that size.
+- `Content-Disposition` is `attachment; filename="<name>"`, plus an RFC 8187
+  `filename*` for a name with non-ASCII (UTF-8) characters.
+- The body is never gzip-compressed, `Range` requests are not supported
+  (`Accept-Ranges: none`), and the connection closes after the transfer.
+- A transfer may take as long as it needs: the abandoned-connection timeout
+  restarts after every chunk, so it only ends a transfer that has stalled.
+- The file is closed when the transfer completes, fails, or the client goes
+  away. A file that cannot be opened is answered with 404.
+- The path is used as given: validate anything derived from the request
+  (no `..`, stay inside your download directory) before passing it.
+
 ---
 
 ### WebSocket Endpoints
@@ -640,9 +680,10 @@ does not currently stream request bodies to disk the way nginx does with
 small hardware: 100 MB is comfortable on a Raspberry Pi 4, but not on a device
 with 512 MB of RAM.
 
-Responses have no such cost — `set_download_file()` streams from disk in 16 KB
-chunks, so serving a backup of any size up to `MAX_REPLY_FILE_SIZE` (512 MiB)
-is not memory-bound.
+Responses need not have that cost: `set_download_file()` streams from disk in
+256 KB chunks, so a download of any size is not memory-bound (see "Answering
+with a file from disk" above). `set_content_from_file()` reads the whole file
+into memory and is capped at `MAX_REPLY_FILE_SIZE` (512 MiB).
 
 A request rejected for size is answered with the status naming what was
 actually breached, so the client can act on it:

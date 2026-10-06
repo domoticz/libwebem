@@ -1,5 +1,34 @@
 # Upgrading libwebem
 
+## Streamed downloads
+
+`reply::set_download_file()` is source-compatible and now suits files of any
+size (see "Answering with a file from disk" in `docs/INTEGRATION.md`). Changes
+an integrator can notice:
+
+- **The download travels in new `reply` fields.** `set_download_file()` fills
+  `download_path`, `download_name` and the new optional
+  `download_content_type` and leaves `content` empty. A handler that sets
+  `status = download_file` and `content = "<path>\r\n<name>"` itself still
+  works.
+- **New overload** `set_download_file(rep, path, name, content_type)` to set the
+  Content-Type instead of deriving it from the extension of the path.
+- **`Content-Disposition` quotes the file name**, as
+  `attachment; filename="name"`, for downloads and for
+  `add_header_attachment()` / `set_content_from_file(..., attachment)`.
+  A name with non-ASCII characters also gets an RFC 8187 `filename*`.
+  `reply::make_content_disposition()` returns the value. Code that parses this
+  header back out of a `reply` must allow for the quotes.
+- **The response says `Accept-Ranges: none` and `Connection: close`**, which is
+  what it does: no `Range` support, and the connection closes after the
+  transfer. It now carries the security headers (`add_security_headers`) and
+  answers `HEAD` with the header only.
+- **A long transfer is no longer cut off** by the 20-minute abandoned-connection
+  timeout, which now restarts after every chunk; and a file that grows during
+  the transfer is sent up to its size at the start, matching `Content-Length`.
+- **The `FILE_SEND_BUFFER_SIZE` macro is gone** from `connection.h`; the chunk
+  size (256 KB) is now a private constant of `connection`.
+
 ## From the 2026-07 security remediation
 
 Most of this release is additive: new `server_settings` fields with safe

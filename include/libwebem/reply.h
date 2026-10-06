@@ -65,6 +65,18 @@ struct reply
   /// The origin of the web request when behind proxies, etc.
   std::string originHost;
 
+  /// Populated by set_download_file() for a download_file reply. The connection
+  /// opens download_path itself and streams it in fixed-size chunks, so the file
+  /// is never held in memory and may be any size. Bytes appended to the file
+  /// after the transfer has started are not sent: the body is the size the file
+  /// had when it was opened.
+  std::string download_path;
+  /// Name the client should save the file under (Content-Disposition).
+  std::string download_name;
+  /// Content-Type for the body. When empty it is derived from the extension of
+  /// download_path, and no Content-Type is sent for an unknown extension.
+  std::string download_content_type;
+
   /// Populated by cWebemRequestHandler when the reply is a WebSocket upgrade (status==switching_protocols).
   /// Carries the fully-authenticated session so connection.cpp can pass it directly to the
   /// WebsocketHandlerFactory without re-parsing cookies.
@@ -89,8 +101,23 @@ struct reply
   static void set_content(reply *rep, const std::wstring & content_w);
   static bool set_content_from_file(reply *rep, const std::string & file_path);
   static bool set_content_from_file(reply *rep, const std::string & file_path, const std::string & attachment, bool set_content_type = false);
+  /// Answers the request with the file at file_path, sent as a download named
+  /// attachment. The connection streams the file from disk in chunks with a
+  /// Content-Length taken from the file size when it is opened, over HTTP and
+  /// HTTPS alike, uncompressed, and closes the connection afterwards; a missing
+  /// or unreadable file becomes a 404. content_type overrides the Content-Type
+  /// otherwise derived from the extension of file_path.
+  /// Returns false (and leaves rep untouched) if file_path or attachment is
+  /// empty, or if any argument contains a control character.
   static bool set_download_file(reply* rep, const std::string& file_path, const std::string& attachment);
-  /// Sets Content-Disposition: attachment; filename=<attachment>.
+  static bool set_download_file(reply* rep, const std::string& file_path, const std::string& attachment, const std::string& content_type);
+  /// Builds the Content-Disposition value for a download named attachment:
+  /// attachment; filename="<name>", with '"' and '\' and every non-ASCII byte
+  /// replaced by '_' inside the quotes. When the name contains non-ASCII bytes
+  /// (taken as UTF-8) the exact name is added as an RFC 8187 filename*
+  /// parameter, which user agents prefer over the plain one.
+  static std::string make_content_disposition(const std::string & attachment);
+  /// Sets Content-Disposition to make_content_disposition(attachment).
   /// Returns false (and adds no header) if attachment contains a control character --
   /// most importantly CR/LF, which would otherwise split the response. attachment is
   /// application-supplied (e.g. a report/backup filename derived from a request

@@ -12,6 +12,7 @@
 #define HTTP_CONNECTION_H
 
 #include <boost/asio.hpp>
+#include <cstdint>
 #include <deque>
 #include <fstream>
 #include "reply.h"
@@ -122,11 +123,27 @@ namespace http {
 			/// from the io thread, even when MyWrite is called by an application thread.
 			void post_stop();
 
-			bool send_file(const std::string& filename, std::string& attachment_name, reply& rep);
-			std::ifstream sendfile_;
+			/// Start answering with a file on disk (a reply::download_file reply):
+			/// open it, write the response header and let handle_write_file() send
+			/// the body. Returns false, with rep replaced by the error reply to send
+			/// instead, when the transfer cannot start.
+			bool send_file(const std::string& filename, const std::string& attachment_name,
+				const std::string& content_type, bool head_only, reply& rep);
+			/// Completion of one write of a file transfer: sends the next chunk, or
+			/// ends the transfer once every byte is out or anything failed (a read
+			/// error, a write error, the client going away).
 			void handle_write_file(const boost::system::error_code& e, size_t bytes_transferred);
-#define FILE_SEND_BUFFER_SIZE 16 * 1024
-			std::unique_ptr<std::array<uint8_t, FILE_SEND_BUFFER_SIZE>> send_buffer_;
+			/// Close the file, free the chunk buffer and stop the connection.
+			void finish_send_file();
+			std::ifstream sendfile_;
+			/// Bytes of the file still to send. Fixed at the file size when it was
+			/// opened, so a file that is still growing is sent up to that size.
+			uint64_t sendfile_remaining_{ 0 };
+			/// Size of one read from the file and one write to the socket.
+			static constexpr size_t file_send_chunk_size = 256 * 1024;
+			/// Chunk buffer, allocated with the first chunk and freed when the
+			/// transfer ends.
+			std::unique_ptr<uint8_t[]> send_buffer_;
 
 			/// Initialize read timeout timer
 			void set_read_timeout();

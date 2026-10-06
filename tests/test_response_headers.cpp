@@ -124,7 +124,7 @@ static void test_add_header_attachment()
     reply rep;
     bool ok = reply::add_header_attachment(&rep, "report.csv");
     CHECK(ok);
-    CHECK(header_value(rep, "Content-Disposition") == "attachment; filename=report.csv");
+    CHECK(header_value(rep, "Content-Disposition") == "attachment; filename=\"report.csv\"");
 
     reply rep2;
     ok = reply::add_header_attachment(&rep2, "a\r\nX-Injected: 1");
@@ -134,18 +134,37 @@ static void test_add_header_attachment()
     CHECK(wire.find("X-Injected") == std::string::npos);
 }
 
-// Finding #16: set_download_file() joins file_path and attachment with an
-// internal "\r\n" delimiter that connection.cpp later splits back apart; a
-// CRLF embedded in either value must be rejected here, at the point the
-// application supplies it, rather than silently smuggling a second delimiter
-// through. Ordinary filenames must be entirely unaffected.
+// Finding #16: set_download_file() must reject a CRLF embedded in the path, the
+// attachment name or the content type at the point the application supplies
+// it, since the name and type end up in response headers. Ordinary filenames
+// must be entirely unaffected.
 static void test_set_download_file()
 {
     reply rep;
     bool ok = reply::set_download_file(&rep, "/tmp/report.csv", "report.csv");
     CHECK(ok);
     CHECK(rep.status == reply::status_type::download_file);
-    CHECK(rep.content == "/tmp/report.csv\r\nreport.csv");
+    CHECK(rep.download_path == "/tmp/report.csv");
+    CHECK(rep.download_name == "report.csv");
+    CHECK(rep.download_content_type.empty());
+    CHECK(rep.content.empty());
+
+    reply rep_type;
+    ok = reply::set_download_file(&rep_type, "/tmp/backup.db", "backup.db", "application/x-sqlite3");
+    CHECK(ok);
+    CHECK(rep_type.download_content_type == "application/x-sqlite3");
+
+    reply rep_bad_type;
+    ok = reply::set_download_file(&rep_bad_type, "/tmp/backup.db", "backup.db", "text/plain\r\nX-Injected: 1");
+    CHECK(!ok);
+    CHECK(rep_bad_type.status != reply::status_type::download_file);
+
+    // reset() must clear the download fields, so a reused reply object does not
+    // turn into a download again.
+    rep.reset();
+    CHECK(rep.download_path.empty());
+    CHECK(rep.download_name.empty());
+    CHECK(rep.download_content_type.empty());
 
     reply rep2;
     ok = reply::set_download_file(&rep2, "f.txt", "a\r\nX-Injected: 1");
@@ -181,7 +200,7 @@ static void test_set_content_from_file_with_bad_attachment()
     reply rep;
     bool ok = reply::set_content_from_file(&rep, path, "snapshot.jpg", true);
     CHECK(ok);
-    CHECK(header_value(rep, "Content-Disposition") == "attachment; filename=snapshot.jpg");
+    CHECK(header_value(rep, "Content-Disposition") == "attachment; filename=\"snapshot.jpg\"");
 
     reply rep2;
     ok = reply::set_content_from_file(&rep2, path, "a\r\nX-Injected: 1", true);
@@ -241,11 +260,27 @@ static void test_add_cors_headers()
     }
 }
 
+// The Content-Disposition filename is always quoted, so a name with spaces,
+// ';' or ',' reaches the client whole. '"' and '\' cannot appear inside the
+// quotes and become '_'. A non-ASCII (UTF-8) name keeps an ASCII fallback in
+// filename= and the exact name, percent-encoded, in filename*=.
+static void test_make_content_disposition()
+{
+    CHECK(reply::make_content_disposition("rec.ts") == "attachment; filename=\"rec.ts\"");
+    CHECK(reply::make_content_disposition("My rec; part 1, final.ts")
+          == "attachment; filename=\"My rec; part 1, final.ts\"");
+    CHECK(reply::make_content_disposition("a\"b\\c.ts") == "attachment; filename=\"a_b_c.ts\"");
+    // "\xC3\xA9" is U+00E9 (e acute) in UTF-8.
+    CHECK(reply::make_content_disposition("caf\xC3\xA9 1.ts")
+          == "attachment; filename=\"caf__ 1.ts\"; filename*=UTF-8''caf%C3%A9%201.ts");
+}
+
 int main()
 {
     test_add_header_rejects_crlf();
     test_add_header_rejects_other_control_chars();
     test_add_header_attachment();
+    test_make_content_disposition();
     test_set_download_file();
     test_set_content_from_file_with_bad_attachment();
     test_add_cors_headers();

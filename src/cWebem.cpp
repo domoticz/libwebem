@@ -916,7 +916,13 @@ namespace http {
 				{
 					if (boost::iequals(header.name, "Content-Disposition"))
 					{
+						// The name is either quoted (filename="x.jpg", as written by
+						// reply::make_content_disposition) or a bare token up to ';'.
 						attachment = header.value.substr(header.value.find('=') + 1);
+						if (!attachment.empty() && (attachment[0] == '"'))
+							attachment = attachment.substr(1, attachment.find('"', 1) - 1);
+						else
+							attachment = attachment.substr(0, attachment.find(';'));
 						std::size_t last_dot_pos = attachment.find_last_of('.');
 						if (last_dot_pos != std::string::npos)
 						{

@@ -15,6 +15,7 @@
 #include <string>
 #include <fstream>
 #include <cstdint>
+#include <cstring>
 #include <boost/algorithm/string.hpp>
 
 namespace http {
@@ -147,6 +148,9 @@ void reply::reset()
 	content = "";
 	bIsGZIP = false;
 	ws_session = WebEmSession{};
+	download_path.clear();
+	download_name.clear();
+	download_content_type.clear();
 }
 
 namespace stock_replies {
@@ -437,28 +441,77 @@ bool reply::set_content_from_file(reply *rep, const std::string &file_path, cons
 
 bool reply::set_download_file(reply* rep, const std::string& file_path, const std::string& attachment)
 {
+	return set_download_file(rep, file_path, attachment, "");
+}
+
+bool reply::set_download_file(reply* rep, const std::string& file_path, const std::string& attachment, const std::string& content_type)
+{
 	if (file_path.empty() || attachment.empty())
 		return false;
-	// file_path and attachment are joined with "\r\n" as an internal delimiter, then
-	// split apart again by connection.cpp's send_file dispatch, which takes
-	// everything after the first CRLF as the attachment name. A CR/LF embedded in
-	// either value would let the caller smuggle a second delimiter (or, once past
-	// add_header_attachment downstream, split the Content-Disposition header
-	// itself). Reject here, at the point the application supplies the value,
-	// rather than deep in the write path.
-	if (utils::contains_control_chars(file_path) || utils::contains_control_chars(attachment))
+	// attachment and content_type end up in response headers, where a CR/LF would
+	// split the response; a control character in a path is never legitimate.
+	// Reject here, at the point the application supplies the value, rather than
+	// deep in the write path.
+	if (utils::contains_control_chars(file_path) || utils::contains_control_chars(attachment)
+		|| utils::contains_control_chars(content_type))
 		return false;
 	rep->reset();
 	rep->status = reply::status_type::download_file;
-	rep->content = file_path + "\r\n" + attachment;
+	rep->download_path = file_path;
+	rep->download_name = attachment;
+	rep->download_content_type = content_type;
 	return true;
+}
+
+std::string reply::make_content_disposition(const std::string &attachment)
+{
+	std::string plain;
+	plain.reserve(attachment.size());
+	bool has_non_ascii = false;
+	for (const char ch : attachment)
+	{
+		const auto uc = static_cast<unsigned char>(ch);
+		if (uc >= 0x80)
+		{
+			has_non_ascii = true;
+			plain += '_';
+		}
+		else if ((ch == '"') || (ch == '\\'))
+			plain += '_';
+		else
+			plain += ch;
+	}
+
+	std::string value = "attachment; filename=\"" + plain + "\"";
+	if (has_non_ascii)
+	{
+		// RFC 8187 ext-value: every byte outside attr-char is percent-encoded.
+		static constexpr char hex_digits[] = "0123456789ABCDEF";
+		value += "; filename*=UTF-8''";
+		for (const char ch : attachment)
+		{
+			const auto uc = static_cast<unsigned char>(ch);
+			const bool attr_char = ((uc >= 'A') && (uc <= 'Z')) || ((uc >= 'a') && (uc <= 'z'))
+				|| ((uc >= '0') && (uc <= '9'))
+				|| ((ch != '\0') && (std::strchr("!#$&+-.^_`|~", ch) != nullptr));
+			if (attr_char)
+				value += ch;
+			else
+			{
+				value += '%';
+				value += hex_digits[uc >> 4];
+				value += hex_digits[uc & 0x0F];
+			}
+		}
+	}
+	return value;
 }
 
 bool reply::add_header_attachment(reply *rep, const std::string &attachment)
 {
 	if (utils::contains_control_chars(attachment))
 		return false;
-	reply::add_header(rep, "Content-Disposition", "attachment; filename=" + attachment);
+	reply::add_header(rep, "Content-Disposition", make_content_disposition(attachment));
 	return true;
 }
 

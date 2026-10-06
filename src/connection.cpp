@@ -615,73 +615,97 @@ namespace http {
 			});
 		}
 
-		void connection::handle_write_file(const boost::system::error_code& error, size_t bytes_transferred)
+		void connection::handle_write_file(const boost::system::error_code& error, size_t /*bytes_transferred*/)
 		{
-			if (!error && sendfile_.is_open() && !sendfile_.eof())
+			if (error || !sendfile_.is_open() || (sendfile_remaining_ == 0))
 			{
-				if (!send_buffer_)
-					send_buffer_ = std::make_unique<std::array<uint8_t, FILE_SEND_BUFFER_SIZE>>();
-				size_t bread = static_cast<size_t>(sendfile_.read((char *)send_buffer_->data(), FILE_SEND_BUFFER_SIZE).gcount());
-				if (bread > 0)
-				{
-					if (secure_) {
-#ifdef WWW_ENABLE_SSL
-						boost::asio::async_write(*sslsocket_, boost::asio::buffer(*send_buffer_, bread),
-									 [self = shared_from_this()](auto &&err, auto bytes) { self->handle_write_file(err, bytes); });
-#endif
-					}
-					else {
-						boost::asio::async_write(*socket_, boost::asio::buffer(*send_buffer_, bread),
-									 [self = shared_from_this()](auto &&err, auto bytes) { self->handle_write_file(err, bytes); });
-					}
-					return;
-				}
-				// bread == 0: a read error, not EOF (that is caught by sendfile_.eof()
-				// above, and a short-of-buffer read still returns bread > 0). Fall
-				// through to the same cleanup as a normal completion instead of
-				// returning bare -- a bare return here used to leave sendfile_ open
-				// and send_buffer_ allocated with no outstanding async operation, so
-				// the connection was neither readable nor reapable until the
-				// 20-minute abandoned timer caught it.
+				// Either every byte is out, or the write failed: the client went
+				// away, or stop() closed the socket under the write (the abandoned
+				// timeout, a server shutdown).
+				finish_send_file();
+				return;
 			}
 
-			// Reaching here -- whether normal EOF, a read error, or the error branch
-			// above -- means no further async_write for this transfer is in flight,
-			// so it is safe to close sendfile_ and free send_buffer_ now: every
-			// async_write callback above captures shared_from_this(), so this
-			// connection object (and therefore sendfile_/send_buffer_) could not
-			// have been destroyed while a write was still outstanding.
+			// The previous write completed, so the transfer is progressing. Push the
+			// abandoned-connection deadline out again: it then ends a transfer that
+			// has stalled for that long, never one that is merely long.
+			reset_abandoned_timeout();
+
+			if (!send_buffer_)
+				send_buffer_.reset(new uint8_t[file_send_chunk_size]);
+			const size_t want = static_cast<size_t>(std::min<uint64_t>(sendfile_remaining_, file_send_chunk_size));
+			sendfile_.read(reinterpret_cast<char *>(send_buffer_.get()), static_cast<std::streamsize>(want));
+			const size_t got = static_cast<size_t>(sendfile_.gcount());
+			if (got != want)
+			{
+				// The file was truncated or became unreadable. The Content-Length
+				// already sent can no longer be met, and closing the connection
+				// short of it is how the client learns the body is incomplete.
+				if (m_logger) m_logger->Log(LogLevel::Error, "%s -> file transfer ended early: read %zu of %zu bytes with %llu bytes still to send",
+							    host_remote_endpoint_address_.c_str(), got, want,
+							    static_cast<unsigned long long>(sendfile_remaining_));
+				finish_send_file();
+				return;
+			}
+			sendfile_remaining_ -= got;
+
+			// Every write callback captures shared_from_this(), so the connection,
+			// the file and send_buffer_ stay alive until the write has completed.
+			if (secure_) {
+#ifdef WWW_ENABLE_SSL
+				boost::asio::async_write(*sslsocket_, boost::asio::buffer(send_buffer_.get(), got),
+							 [self = shared_from_this()](auto &&err, auto bytes) { self->handle_write_file(err, bytes); });
+#endif
+			}
+			else {
+				boost::asio::async_write(*socket_, boost::asio::buffer(send_buffer_.get(), got),
+							 [self = shared_from_this()](auto &&err, auto bytes) { self->handle_write_file(err, bytes); });
+			}
+		}
+
+		void connection::finish_send_file()
+		{
+			// Only called from a write completion with no further write issued, so
+			// nothing in flight still refers to the file or the buffer.
 			if (sendfile_.is_open())
 				sendfile_.close();
-
-			// reset(), not release(): release() relinquishes ownership without
-			// freeing, leaking FILE_SEND_BUFFER_SIZE (16 KB) on every completed and
-			// every aborted download.
+			sendfile_.clear();
+			sendfile_remaining_ = 0;
 			send_buffer_.reset();
 			connection_manager_.stop(shared_from_this());
 		}
 
-		bool connection::send_file(const std::string& filename, std::string& attachment_name, reply& rep)
+		bool connection::send_file(const std::string& filename, const std::string& attachment_name,
+			const std::string& content_type, bool head_only, reply& rep)
 		{
-			boost::system::error_code write_error;
-
-			rep = reply::stock_reply(reply::ok);
-
-			sendfile_.open(filename.c_str(), std::ios::in | std::ios::binary); //we open this file
+			sendfile_.open(filename.c_str(), std::ios::in | std::ios::binary);
 			if (!sendfile_.is_open())
 			{
-				//File not found!
+				rep = reply::stock_reply(reply::not_found);
+				return false;
+			}
+
+			// The size now is the size sent: a file that is still being written
+			// is sent up to this point, so the body always matches Content-Length.
+			sendfile_.seekg(0, std::ios::end);
+			const std::streamoff total_size = sendfile_.tellg();
+			sendfile_.seekg(0, std::ios::beg);
+			if ((total_size < 0) || !sendfile_)
+			{
+				// Opened but not a seekable regular file (a directory or a device on
+				// some platforms).
+				sendfile_.close();
+				sendfile_.clear();
 				rep = reply::stock_reply(reply::not_found);
 				return false;
 			}
 			time_t ftime = last_write_time(filename, m_logger);
 
-			sendfile_.seekg(0, std::ios::end);
-			std::streamsize total_size = sendfile_.tellg();
-			sendfile_.seekg(0, std::ios::beg);
-
+			rep = reply::stock_reply(reply::ok, true, secure_);
 			reply::add_header(&rep, "Cache-Control", "max-age=0, private");
-			reply::add_header(&rep, "Accept-Ranges", "bytes");
+			// Range requests are not supported; say so rather than have a client
+			// try to resume and be sent the whole file again.
+			reply::add_header(&rep, "Accept-Ranges", "none");
 			reply::add_header(&rep, "Date", utils::make_web_time(time(nullptr)));
 			reply::add_header(&rep, "Last-Modified", utils::make_web_time(ftime));
 			// Use the configured server name if set, otherwise omit the Server header.
@@ -691,11 +715,18 @@ namespace http {
 					reply::add_header(&rep, "Server", webem->m_settings.server_name);
 			}
 
-			std::size_t last_dot_pos = filename.find_last_of('.');
-			if (last_dot_pos != std::string::npos) {
-				std::string file_extension = filename.substr(last_dot_pos + 1);
-				std::string mime_type = mime_types::extension_to_type(file_extension);
-				reply::add_header_content_type(&rep, mime_type);
+			if (!content_type.empty())
+				reply::add_header_content_type(&rep, content_type);
+			else
+			{
+				const std::size_t last_dot_pos = filename.find_last_of('.');
+				const std::size_t last_sep_pos = filename.find_last_of("/\\");
+				if ((last_dot_pos != std::string::npos)
+					&& ((last_sep_pos == std::string::npos) || (last_dot_pos > last_sep_pos))) {
+					std::string file_extension = filename.substr(last_dot_pos + 1);
+					std::string mime_type = mime_types::extension_to_type(file_extension);
+					reply::add_header_content_type(&rep, mime_type);
+				}
 			}
 			if (!reply::add_header_attachment(&rep, attachment_name))
 			{
@@ -708,14 +739,19 @@ namespace http {
 				// handle_read()). Bail out here rather than falling through to stream
 				// the file with no Content-Disposition header at all.
 				sendfile_.close();
+				sendfile_.clear();
 				rep = reply::stock_reply(reply::internal_server_error);
 				return false;
 			}
 			reply::add_header(&rep, "Content-Length", std::to_string(total_size));
+			// The connection is closed once the body is out (finish_send_file).
+			reply::add_header(&rep, "Connection", "close");
 
-			//write headers
-			std::string headers = rep.to_string("GET");
-			write_buffer = headers;
+			sendfile_remaining_ = head_only ? 0 : static_cast<uint64_t>(total_size);
+			status_ = WAITING_WRITE;
+
+			// The header goes out first; its completion sends the first chunk.
+			write_buffer = rep.header_to_string();
 
 			if (secure_) {
 #ifdef WWW_ENABLE_SSL
@@ -1066,34 +1102,36 @@ namespace http {
 							return;
 						}
 						else if (reply_.status == reply::download_file) {
-							std::string filename_attachment = reply_.content;
-							size_t npos = filename_attachment.find("\r\n");
-							if (npos == std::string::npos)
+							std::string filename = reply_.download_path;
+							std::string attachment = reply_.download_name;
+							const std::string content_type = reply_.download_content_type;
+							if (filename.empty())
+							{
+								// A handler that sets status and content itself instead of
+								// calling reply::set_download_file() passes
+								// "<file path>\r\n<attachment name>" in content.
+								const size_t npos = reply_.content.find("\r\n");
+								if (npos != std::string::npos)
+								{
+									filename = reply_.content.substr(0, npos);
+									attachment = reply_.content.substr(npos + 2);
+								}
+							}
+							if (filename.empty())
 							{
 								reply_ = reply::stock_reply(reply::internal_server_error);
 							}
-							else
+							else if (send_file(filename, attachment, content_type, request_.method == "HEAD", reply_))
 							{
-								std::string filename = filename_attachment.substr(0, npos);
-								std::string attachment = filename_attachment.substr(npos + 2);
-								if (!send_file(filename, attachment, reply_))
-								{
-									// send_file() failed (file not found, or attachment_name rejected
-									// control-character validation). Either way it has already
-									// overwritten reply_ with a stock error reply before returning
-									// false -- reply_.status is guaranteed not to still be
-									// download_file (102, an internal sentinel that must never be
-									// serialised to the wire) -- so falling through to the ordinary
-									// reply-writing path below is safe and sends that error reply.
-								}
-								else
-								{
-									// send_file() takes over writing the response; request_ has
-									// no further use here, and this bypasses the reset below.
-									request_ = request();
-									return;
-								}
+								// send_file() takes over writing the response; request_ has
+								// no further use here, and this bypasses the reset below.
+								request_ = request();
+								return;
 							}
+							// Otherwise send_file() has replaced reply_ with a stock error
+							// reply, so reply_.status is no longer download_file (102, an
+							// internal sentinel that must never reach the wire) and the
+							// ordinary reply-writing path below sends that error.
 						}
 
 						if (request_.keep_alive && ((reply_.status == reply::ok) || (reply_.status == reply::no_content) || (reply_.status == reply::not_modified))) {

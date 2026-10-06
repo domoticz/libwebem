@@ -178,10 +178,19 @@ std::string convert_to_http_date(time_t time)
 
 time_t last_write_time(const std::string &path, const WebServerLogger &logger)
 {
+#ifdef _WIN32
+	// The Windows stat() has a 32-bit st_size and fails with EOVERFLOW for a
+	// file of 2 GB or more; _stat64 handles any size.
+	struct _stat64 st;
+	if (_stat64(path.c_str(), &st) == 0) {
+		return static_cast<time_t>(st.st_mtime);
+	}
+#else
 	struct stat st;
 	if (stat(path.c_str(), &st) == 0) {
 		return st.st_mtime;
 	}
+#endif
 	if (logger) logger->Log(LogLevel::Error, "stat returned errno = %d", errno);
 	return 0;
 }
