@@ -515,10 +515,11 @@ namespace http {
 				if (self->connection_type == ConnectionType::connection_websocket) {
 					self->MyWriteOnStrand(CWebsocketFrame::Create(opcode_text, resp, false));
 				}
-				else {
+				else if (self->connection_type == ConnectionType::connection_http) {
 					// socket connection not set up yet, add to queue
 					self->QueuePreUpgradeFrame(CWebsocketFrame::Create(opcode_text, resp, false));
 				}
+				// else: the websocket is closing, the frame is dropped
 			});
 		}
 
@@ -529,10 +530,11 @@ namespace http {
 				if (self->connection_type == ConnectionType::connection_websocket) {
 					self->MyWriteOnStrand(CWebsocketFrame::Create(opcode_binary, data, false));
 				}
-				else {
+				else if (self->connection_type == ConnectionType::connection_http) {
 					// socket connection not set up yet, add to queue
 					self->QueuePreUpgradeFrame(CWebsocketFrame::Create(opcode_binary, data, false));
 				}
+				// else: the websocket is closing, the frame is dropped
 			});
 		}
 
@@ -1288,9 +1290,14 @@ namespace http {
 						read_more();
 					}
 					else {
-						// a connection close control packet was received
-						// todo: wait for writeQ to flush?
-						connection_type = ConnectionType::connection_websocket_closing;
+						// A connection close control packet was received. The parser has posted
+						// the close reply onto strand_ through MyWrite; switch to the closing state
+						// through the same strand, after that reply, or MyWriteOnStrand would drop
+						// it. Once the write queue has drained handle_write stops the connection,
+						// because keepalive_ is now false.
+						boost::asio::post(strand_, [self = shared_from_this()]() {
+							self->connection_type = ConnectionType::connection_websocket_closing;
+						});
 					}
 					break;
 				}
