@@ -1235,22 +1235,27 @@ namespace http {
 							break;
 						}
 
-						// Debug, not Error: every input that reaches here is chosen by
-						// the client, so an Error-level line per malformed request lets
-						// anyone fill an operator's log by sending junk -- the same
-						// amplification the refusal logging in connection_manager is
-						// throttled to avoid. Nothing has gone wrong on this side; a
-						// bad request was correctly rejected.
+						// Every input that reaches here is chosen by the client, so a line
+						// per malformed request would let anyone fill an operator's log by
+						// sending junk. It is still logged at Status level once per address
+						// per minute, so scanners stay visible (and bannable, for example
+						// by fail2ban); the repeats go to Debug. Nothing has gone wrong on
+						// this side; a bad request was correctly rejected.
 						//
 						// The previous wording ("Error parsing http request address")
 						// also misread: the peer address parsed fine and is only context
 						// here. What failed is the request, and the reason -- which is
 						// what an operator chasing a limit that is set too low actually
 						// needs -- was not reported at all.
-						if (m_logger) m_logger->Debug(DebugCategory::WebServer,
-							"%s -> rejected malformed or oversized request, replying %d",
-							host_remote_endpoint_address_.c_str(),
-							static_cast<int>(reject_status));
+						if (m_logger)
+						{
+							if (connection_manager_.should_log_client_error(host_remote_endpoint_address_))
+								m_logger->Log(LogLevel::Status, "%s -> rejected malformed or oversized request, replying %d",
+									host_remote_endpoint_address_.c_str(), static_cast<int>(reject_status));
+							else
+								m_logger->Debug(DebugCategory::WebServer, "%s -> rejected malformed or oversized request, replying %d",
+									host_remote_endpoint_address_.c_str(), static_cast<int>(reject_status));
+						}
 						reply_ = reply::stock_reply(reject_status);
 						MyWrite(reply_.to_string(request_.method));
 						if (keepalive_) {
@@ -1414,8 +1419,17 @@ namespace http {
 				return;
 			if (status_ != WAITING_HANDSHAKE)
 				return; // already progressed; nothing to do
-			if (m_logger) m_logger->Log(LogLevel::Status, "%s -> TLS handshake not completed within %d seconds, dropping connection",
-						    host_remote_endpoint_address_.c_str(), tls_handshake_timeout_);
+			// Throttled per address like a rejected request: a client that never finishes
+			// the handshake could otherwise add a line for every connection it opens
+			if (m_logger)
+			{
+				if (connection_manager_.should_log_client_error(host_remote_endpoint_address_))
+					m_logger->Log(LogLevel::Status, "%s -> TLS handshake not completed within %d seconds, dropping connection",
+						host_remote_endpoint_address_.c_str(), tls_handshake_timeout_);
+				else
+					m_logger->Debug(DebugCategory::WebServer, "%s -> TLS handshake not completed within %d seconds, dropping connection",
+						host_remote_endpoint_address_.c_str(), tls_handshake_timeout_);
+			}
 			connection_manager_.stop(shared_from_this());
 		}
 

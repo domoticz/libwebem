@@ -44,6 +44,36 @@ namespace server {
 		refusals_since_log_ = 0;
 	}
 
+	bool connection_manager::should_log_client_error(const std::string &remote_address)
+	{
+		const time_t now = utils::webem_time();
+		auto itt = client_error_logged_.find(remote_address);
+		if (itt != client_error_logged_.end())
+		{
+			if ((now - itt->second) < kClientErrorLogInterval)
+				return false;
+			itt->second = now;
+			return true;
+		}
+		if (client_error_logged_.size() >= kClientErrorLogMaxAddresses)
+		{
+			// Forget the addresses whose interval has passed; if they are all recent
+			// (a scan from very many addresses) start over, which at worst logs a few
+			// more lines rather than hiding new addresses
+			for (auto it = client_error_logged_.begin(); it != client_error_logged_.end();)
+			{
+				if ((now - it->second) >= kClientErrorLogInterval)
+					it = client_error_logged_.erase(it);
+				else
+					++it;
+			}
+			if (client_error_logged_.size() >= kClientErrorLogMaxAddresses)
+				client_error_logged_.clear();
+		}
+		client_error_logged_[remote_address] = now;
+		return true;
+	}
+
 	void connection_manager::start(const connection_ptr &c)
 	{
 		// Resolve the peer up front. This is the key we will have to decrement by in

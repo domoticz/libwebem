@@ -85,6 +85,13 @@ public:
   /// Current in-flight-request-body total (diagnostics / tests).
   size_t body_bytes_in_flight() const { return body_bytes_in_flight_; }
 
+  /// Whether a client error of remote_address (a rejected malformed request, a TLS
+  /// handshake that never completed) should be logged at Status level now: at most
+  /// once per address per kClientErrorLogInterval seconds. Every scanning address
+  /// still shows up in the log, so tools like fail2ban can ban it, but one client
+  /// sending junk cannot fill the log. Callers log the throttled ones at Debug.
+  bool should_log_client_error(const std::string &remote_address);
+
 private:
   /// The managed connections.
   std::set<connection_ptr> connections_;
@@ -119,6 +126,13 @@ private:
   static constexpr time_t kRefusalLogInterval = 60;
   time_t last_refusal_log_{ 0 };
   size_t refusals_since_log_{ 0 };
+
+  /// Last Status-level client error line per address, see should_log_client_error().
+  /// Bounded by kClientErrorLogMaxAddresses so many distinct addresses cannot grow it
+  /// without limit.
+  std::map<std::string, time_t> client_error_logged_;
+  static constexpr time_t kClientErrorLogInterval = 60;
+  static constexpr size_t kClientErrorLogMaxAddresses = 1024;
 };
 
 } // namespace server
